@@ -1,0 +1,10 @@
+apex_cache/
+apex_results/
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,7 @@
+optuna>=3.4
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
+plotly>=5.17
+pyarrow>=14.0
+pywin32>=306; sys_platform == "win32"

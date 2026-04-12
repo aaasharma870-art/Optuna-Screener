@@ -1,0 +1,64 @@
+{
+    "polygon_api_key": "YOUR_POLYGON_API_KEY_HERE",
+    "cache_dir": "apex_cache",
+    "output_dir": "apex_results",
+
+    "target_symbols": ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN", "TSLA"],
+
+    "universe": {
+        "min_price": 20,
+        "max_price": 5000,
+        "min_avg_volume": 2000000,
+        "min_daily_bars": 252
+    },
+
+    "timeframes": ["1H", "daily"],
+    "backtest_window_days": 365,
+
+    "optimization": {
+        "architecture_trials": 200,
+        "architecture_quick_tune_trials": 30,
+        "deep_tune_trials_per_symbol": 800,
+        "walk_forward_oos_pct": 0.30,
+        "fitness_is_weight": 0.4,
+        "fitness_oos_weight": 0.6,
+        "top_architectures_to_keep": 5,
+        "max_symbols_to_optimize": 15,
+        "final_holdout_pct": 0.25,
+        "max_correlation": 0.70,
+        "max_per_sector": 3
+    },
+
+    "robustness": {
+        "monte_carlo_sims": 3000,
+        "min_prob_profit": 0.85,
+        "noise_injection_bar_jitter": 1,
+        "noise_injection_price_pct": 5,
+        "param_jitter_pct": 10,
+        "min_robustness_score": 0.4
+    },
+
+    "budget_profiles": {
+        "light":  {"arch_trials": 30,  "deep_trials": 50,   "mc_sims": 500},
+        "medium": {"arch_trials": 120, "deep_trials": 150,  "mc_sims": 3000},
+        "heavy":  {"arch_trials": 300, "deep_trials": 400,  "mc_sims": 5000}
+    },
+
+    "polygon_rate_limit": {
+        "sleep_between_calls": 0.12,
+        "max_retries": 5,
+        "retry_wait": 5
+    },
+
+    "phase3_params": {
+        "exec_timeframe": "1H",
+        "start_date": "2024-01-01",
+        "end_date": "2025-12-31",
+        "min_1h_bars": 200
+    },
+
+    "amibroker": {
+        "database_path": "C:\\AmiBroker\\Data",
+        "formulas_path": "C:\\Program Files\\AmiBroker\\Formulas\\Custom"
+    }
+}

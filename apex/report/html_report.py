@@ -179,6 +179,34 @@ def generate_html_report(results, architecture, robustness_data, run_info, outpu
             <td>{mc.get('p95_dd', 0):.1f}%</td>
         </tr>\n"""
 
+    # Validation tab rows
+    has_validation = False
+    val_rows = ""
+    for sym in sorted_syms:
+        rd = robustness_data.get(sym, {})
+        if not rd:
+            continue
+        smc_frac = rd.get("synthetic_mc_profitable_frac")
+        dsr_val = rd.get("dsr")
+        pbo_val = rd.get("pbo")
+        if smc_frac is not None or dsr_val is not None or pbo_val is not None:
+            has_validation = True
+        smc_display = f"{smc_frac*100:.1f}%" if smc_frac is not None else "&mdash;"
+        smc_pass = rd.get("synthetic_mc_pass")
+        smc_badge = ""
+        if smc_pass is True:
+            smc_badge = ' <span style="color:#3fb950;">PASS</span>'
+        elif smc_pass is False:
+            smc_badge = ' <span style="color:#f85149;">FAIL</span>'
+        dsr_display = f"{dsr_val:.4f}" if dsr_val is not None else "&mdash;"
+        pbo_display = f"{pbo_val:.4f}" if pbo_val is not None else "&mdash;"
+        val_rows += f"""<tr>
+            <td>{sym}</td>
+            <td>{smc_display}{smc_badge}</td>
+            <td>{dsr_display}</td>
+            <td>{pbo_display}</td>
+        </tr>\n"""
+
     arch_desc = f"""
     <strong>Indicators:</strong> {', '.join(architecture.get('indicators', []))}<br>
     <strong>Exit Methods:</strong> {', '.join(architecture.get('exit_methods', []))}<br>
@@ -261,6 +289,7 @@ def generate_html_report(results, architecture, robustness_data, run_info, outpu
   <div class="tab" onclick="showTab(3)">Trade Journal</div>
   <div class="tab" onclick="showTab(4)">Optimization</div>
   <div class="tab" onclick="showTab(5)">Robustness</div>
+  <div class="tab" onclick="showTab(6)">Validation</div>
 </div>
 
 <!-- PAGE 1: Executive Summary -->
@@ -345,6 +374,18 @@ def generate_html_report(results, architecture, robustness_data, run_info, outpu
   <th>Sensitivity</th><th>Composite</th><th>MC Prob Profit</th><th>MC P95 DD</th>
 </tr></thead>
 <tbody>{rob_rows}</tbody>
+</table>
+</div>
+
+<!-- PAGE 7: Validation -->
+<div class="tab-page" id="page6">
+<h2>Validation Suite</h2>
+{"<p style='color:#8b949e;'>Synthetic MC, Deflated Sharpe Ratio, and Probability of Backtest Overfitting results per symbol.</p>" if has_validation else "<p style='color:#8b949e;'>No validation tests were enabled for this run. Enable them in <code>apex_config.json</code> under <code>validation</code>.</p>"}
+<table>
+<thead><tr>
+  <th>Symbol</th><th>Synthetic MC Pass Rate</th><th>DSR</th><th>PBO</th>
+</tr></thead>
+<tbody>{val_rows}</tbody>
 </table>
 </div>
 

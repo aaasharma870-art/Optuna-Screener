@@ -64,6 +64,11 @@
         "bars_per_day_5min": 78
     },
 
+    "fitness": {
+        "use_multi_objective": false,
+        "max_dd_cap_pct": 8.0
+    },
+
     "cross_asset_basket": {
         "enabled": false,
         "symbols": ["SPY", "QQQ", "GLD", "USO", "IEF"],

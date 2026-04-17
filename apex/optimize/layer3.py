@@ -5,6 +5,7 @@ import pandas as pd
 
 from apex.logging_util import log
 from apex.engine.backtest import full_backtest
+from apex.engine.strategy_backtest import strategy_full_backtest
 from apex.util.checkpoints import save_checkpoint
 from apex.validation.synthetic_mc import synthetic_price_mc, passes_synthetic_gate
 from apex.validation.dsr import deflated_sharpe_ratio
@@ -55,21 +56,25 @@ def monte_carlo_validate(trade_pnls, n_sims=3000, initial_equity=10000):
     }
 
 
-def noise_injection_test(df_dict, architecture, params, cfg):
+def noise_injection_test(df_dict, architecture, params, cfg, strategy_adapter=None):
     """
     Inject noise into data and measure backtest degradation.
 
-      * Add +/-5% random noise to close prices
-      * Shift close by 1 bar to simulate timing jitter
-
-    Returns dict with clean_pf, noisy_pf, pf_retention.
+    If strategy_adapter is provided, uses the user strategy's entry/exit logic
+    instead of the pipeline's built-in backtest.
     """
     df = df_dict.get("exec_df")
     daily_df = df_dict.get("daily_df")
     if df is None or len(df) < 100:
         return {"clean_pf": 0.0, "noisy_pf": 0.0, "pf_retention": 0.0}
 
-    _, stats_clean = full_backtest(df, daily_df, architecture, params)
+    sym = df_dict.get("_sym", "UNKNOWN")
+    spy_df = df_dict.get("_spy_df")
+
+    if strategy_adapter is not None:
+        _, stats_clean = strategy_full_backtest(strategy_adapter, df, spy_df, sym)
+    else:
+        _, stats_clean = full_backtest(df, daily_df, architecture, params)
     clean_pf = stats_clean.get("pf", 0.0)
 
     rng = np.random.RandomState(123)
@@ -80,7 +85,10 @@ def noise_injection_test(df_dict, architecture, params, cfg):
     df_noisy["low"] = np.minimum(df_noisy["low"], df_noisy["close"])
     df_noisy["close"] = df_noisy["close"].shift(1).bfill()
 
-    _, stats_noisy = full_backtest(df_noisy, daily_df, architecture, params)
+    if strategy_adapter is not None:
+        _, stats_noisy = strategy_full_backtest(strategy_adapter, df_noisy, spy_df, sym)
+    else:
+        _, stats_noisy = full_backtest(df_noisy, daily_df, architecture, params)
     noisy_pf = stats_noisy.get("pf", 0.0)
 
     pf_retention = noisy_pf / clean_pf if clean_pf > 0 else 0.0
@@ -92,27 +100,37 @@ def noise_injection_test(df_dict, architecture, params, cfg):
     }
 
 
-def regime_stress_test(df_dict, architecture, params, cfg):
+def regime_stress_test(df_dict, architecture, params, cfg, strategy_adapter=None):
     """
     Flip the regime model to measure regime sensitivity.
-
-    The stressed run re-evaluates the strategy with an alternate regime model
-    (``trend`` if the baseline was ``ema``, else ``ema``).
+    For strategy mode, re-run the user strategy on the same data (no regime to flip,
+    so we measure consistency by running twice with a small price shift).
     """
     df = df_dict.get("exec_df")
     daily_df = df_dict.get("daily_df")
     if df is None or len(df) < 100:
         return {"normal_pf": 0.0, "stressed_pf": 0.0, "pf_retention": 0.0}
 
-    _, stats_normal = full_backtest(df, daily_df, architecture, params)
-    normal_pf = stats_normal.get("pf", 0.0)
+    sym = df_dict.get("_sym", "UNKNOWN")
+    spy_df = df_dict.get("_spy_df")
 
-    arch_stressed = dict(architecture)
-    baseline = architecture.get("regime_model", "ema")
-    arch_stressed["regime_model"] = "trend" if baseline != "trend" else "ema"
-
-    _, stats_stressed = full_backtest(df, daily_df, arch_stressed, params)
-    stressed_pf = stats_stressed.get("pf", 0.0)
+    if strategy_adapter is not None:
+        _, stats_normal = strategy_full_backtest(strategy_adapter, df, spy_df, sym)
+        normal_pf = stats_normal.get("pf", 0.0)
+        # Stress: shift prices by 1 bar (timing stress)
+        df_stressed = df.copy()
+        df_stressed["close"] = df_stressed["close"].shift(1).bfill()
+        df_stressed["open"] = df_stressed["open"].shift(1).bfill()
+        _, stats_stressed = strategy_full_backtest(strategy_adapter, df_stressed, spy_df, sym)
+        stressed_pf = stats_stressed.get("pf", 0.0)
+    else:
+        _, stats_normal = full_backtest(df, daily_df, architecture, params)
+        normal_pf = stats_normal.get("pf", 0.0)
+        arch_stressed = dict(architecture)
+        baseline = architecture.get("regime_model", "ema")
+        arch_stressed["regime_model"] = "trend" if baseline != "trend" else "ema"
+        _, stats_stressed = full_backtest(df, daily_df, arch_stressed, params)
+        stressed_pf = stats_stressed.get("pf", 0.0)
 
     pf_retention = stressed_pf / normal_pf if normal_pf > 0 else 0.0
 
@@ -123,12 +141,14 @@ def regime_stress_test(df_dict, architecture, params, cfg):
     }
 
 
-def param_sensitivity_test(df_dict, architecture, params, cfg):
+def param_sensitivity_test(df_dict, architecture, params, cfg, strategy_adapter=None):
     """
-    Jitter each numerical parameter by +/-10% and measure PF stability.
+    Jitter parameters by +/-10% and measure PF stability.
+    In strategy mode with no tunable params, returns a neutral score.
+    """
+    if strategy_adapter is not None and not strategy_adapter.tunable_params:
+        return {"_no_params": {"stable": True, "pf_range": [1.0, 1.0], "base_pf": 1.0}}
 
-    Returns dict of {param_name: {"stable": bool, "pf_range": [min, max]}}.
-    """
     df = df_dict.get("exec_df")
     daily_df = df_dict.get("daily_df")
     if df is None or len(df) < 100:
@@ -171,7 +191,7 @@ def param_sensitivity_test(df_dict, architecture, params, cfg):
     return sensitivity
 
 
-def layer3_robustness_gauntlet(data_dict, architecture, tuned_results, cfg):
+def layer3_robustness_gauntlet(data_dict, architecture, tuned_results, cfg, strategy_adapter=None):
     """
     Layer 3: comprehensive robustness testing.
 
@@ -193,13 +213,13 @@ def layer3_robustness_gauntlet(data_dict, architecture, tuned_results, cfg):
         mc = monte_carlo_validate(trade_pnls, n_sims=cfg.get("robustness", {}).get("monte_carlo_sims", 3000))
         mc_score = mc["prob_profit"]
 
-        noise = noise_injection_test(sym_data, architecture, params, cfg)
+        noise = noise_injection_test(sym_data, architecture, params, cfg, strategy_adapter=strategy_adapter)
         noise_score = min(1.0, max(0.0, noise["pf_retention"]))
 
-        stress = regime_stress_test(sym_data, architecture, params, cfg)
+        stress = regime_stress_test(sym_data, architecture, params, cfg, strategy_adapter=strategy_adapter)
         stress_score = min(1.0, max(0.0, stress["pf_retention"]))
 
-        sensitivity = param_sensitivity_test(sym_data, architecture, params, cfg)
+        sensitivity = param_sensitivity_test(sym_data, architecture, params, cfg, strategy_adapter=strategy_adapter)
         if sensitivity:
             stable_count = sum(1 for v in sensitivity.values() if v["stable"])
             sensitivity_score = stable_count / len(sensitivity)

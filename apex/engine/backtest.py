@@ -837,6 +837,18 @@ DEFAULT_ARCHITECTURE = {
     "direction": "long",
 }
 
+VRP_DEFAULT_ARCHITECTURE = {
+    "indicators": ["VPIN", "VWCLV", "RSI2", "VWAP"],
+    "min_score": 2,
+    "exit_methods": ["fixed_target", "fixed_stop", "trailing_stop", "regime_exit", "time_exit"],
+    "regime_model": "vrp",
+    "direction": "neutral",  # allows both long and short
+    "position_sizing": "regime_scaled",
+    "exec_timeframe": "5min",
+    "score_aggregation": "weighted",
+    "concept_weights": {},
+}
+
 DEFAULT_PARAMS = {
     "rsi_period": 14,
     "rsi_oversold": 30,

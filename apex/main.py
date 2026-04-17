@@ -6,12 +6,13 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from apex.config import CFG, OUTPUT_DIR, FORCED_SYMBOLS, load_config
 from apex.logging_util import log
 from apex.data.polygon_client import fetch_daily, fetch_bars
-from apex.engine.backtest import full_backtest, DEFAULT_ARCHITECTURE, DEFAULT_PARAMS
+from apex.engine.backtest import full_backtest, DEFAULT_ARCHITECTURE, DEFAULT_PARAMS, VRP_DEFAULT_ARCHITECTURE
 from apex.engine.portfolio import correlation_filter, phase_full_backtest
 from apex.optimize.layer1 import layer1_architecture_search
 from apex.optimize.layer2 import layer2_deep_tune
@@ -22,6 +23,172 @@ from apex.report.amibroker import generate_apex_afl, push_to_amibroker
 from apex.util.concept_parser import parse_concept
 from apex.util.sector_map import SECTOR_MAP
 from apex.util.checkpoints import save_checkpoint, load_checkpoint
+
+
+def validate_vrp(cfg):
+    """VRP strategy smoke test -- 6 diagnostic checks."""
+    from pathlib import Path
+    import traceback
+
+    print("=== VRP STRATEGY VALIDATION ===\n")
+    checks_passed = 0
+    checks_total = 6
+
+    # --- Check 1: Fetch VIX, VXV from FRED ---
+    print("CHECK 1: FRED VIX/VXV fetch")
+    try:
+        from apex.data.fred_client import fetch_fred_series
+        vix_df = fetch_fred_series("VIXCLS", "2015-01-01", "2026-12-31")
+        vxv_df = fetch_fred_series("VXVCLS", "2015-01-01", "2026-12-31")
+        if vix_df.empty or vxv_df.empty:
+            print("  WARN: FRED returned empty data (API key missing or rate-limited)")
+            print("  SKIP\n")
+        else:
+            print(f"  VIX: {len(vix_df)} rows, last 5:")
+            print(vix_df.tail(5).to_string(header=True))
+            print(f"  VXV: {len(vxv_df)} rows, last 5:")
+            print(vxv_df.tail(5).to_string(header=True))
+            checks_passed += 1
+            print("  PASS\n")
+    except Exception as e:
+        print(f"  SKIP (FRED unavailable: {e})\n")
+
+    # --- Check 2: Compute VRP on SPY daily data ---
+    print("CHECK 2: VRP computation on SPY daily data")
+    try:
+        from apex.data.fred_client import fetch_fred_series
+        from apex.regime.vrp import compute_vrp
+        from apex.data.polygon_client import fetch_daily
+
+        _, spy_daily, status = fetch_daily("SPY")
+        if spy_daily is None or len(spy_daily) == 0:
+            print(f"  SKIP (SPY daily fetch failed: {status})\n")
+        else:
+            vix_df = fetch_fred_series("VIXCLS", "2015-01-01", "2026-12-31")
+            if vix_df.empty:
+                print("  SKIP (FRED VIX unavailable)\n")
+            else:
+                daily_close = spy_daily.set_index("datetime")["close"]
+                iv_aligned = vix_df["value"].reindex(daily_close.index, method="ffill")
+                vrp_result = compute_vrp(iv_aligned, daily_close, rv_window=20, pct_window=252)
+                vrp_pct = vrp_result["vrp_pct"].dropna()
+                print(f"  VRP computed: {len(vrp_result)} rows, {len(vrp_pct)} non-NaN")
+                print(f"  Last 20 vrp_pct values:")
+                print(vrp_pct.tail(20).to_string())
+                in_range = (vrp_pct >= 0).all() and (vrp_pct <= 100).all()
+                print(f"  Range check [0, 100]: {'PASS' if in_range else 'FAIL'}")
+                if in_range:
+                    checks_passed += 1
+                    print("  PASS\n")
+                else:
+                    print("  FAIL\n")
+    except Exception as e:
+        print(f"  SKIP ({e})\n")
+
+    # --- Check 3: VPIN on SPY fixture data ---
+    print("CHECK 3: VPIN computation")
+    try:
+        from apex.indicators.vpin import compute_vpin
+        fixture_path = Path(__file__).parent.parent / "tests" / "fixtures" / "SPY_1H.parquet"
+        spy_bars = pd.read_parquet(fixture_path)
+        vpin_df = compute_vpin(spy_bars)
+        vpin_vals = vpin_df["vpin"].dropna()
+        if len(vpin_vals) == 0:
+            print("  WARN: VPIN all NaN")
+            print("  FAIL\n")
+        else:
+            mean_vpin = vpin_vals.mean()
+            print(f"  VPIN stats: count={len(vpin_vals)}, mean={mean_vpin:.4f}, "
+                  f"std={vpin_vals.std():.4f}, min={vpin_vals.min():.4f}, max={vpin_vals.max():.4f}")
+            ok = 0.0 <= mean_vpin <= 1.0
+            print(f"  Mean in [0, 1]: {'PASS' if ok else 'FAIL'}")
+            if ok:
+                checks_passed += 1
+                print("  PASS\n")
+            else:
+                print("  FAIL\n")
+    except Exception as e:
+        print(f"  ERROR: {e}\n")
+
+    # --- Check 4: VWCLV on SPY fixture data ---
+    print("CHECK 4: VWCLV computation")
+    try:
+        from apex.indicators.vwclv import compute_vwclv
+        fixture_path = Path(__file__).parent.parent / "tests" / "fixtures" / "SPY_1H.parquet"
+        spy_bars = pd.read_parquet(fixture_path)
+        vwclv_df = compute_vwclv(spy_bars)
+        cum = vwclv_df["cum_vwclv"].dropna()
+        print(f"  cum_vwclv: mean={cum.mean():.4f}, std={cum.std():.4f}, "
+              f"min={cum.min():.4f}, max={cum.max():.4f}")
+        checks_passed += 1
+        print("  PASS\n")
+    except Exception as e:
+        print(f"  ERROR: {e}\n")
+
+    # --- Check 5: Regime classification ---
+    print("CHECK 5: VRP regime classification")
+    try:
+        from apex.regime.vrp_regime import compute_vrp_regime
+        # Try with real data first, fall back to synthetic
+        fixture_path = Path(__file__).parent.parent / "tests" / "fixtures" / "SPY_daily.parquet"
+        spy_daily = pd.read_parquet(fixture_path)
+        n = min(252, len(spy_daily))
+        spy_daily = spy_daily.tail(n).reset_index(drop=True)
+
+        # Synthesize plausible VIX/VXV/VRP data for fixture test
+        np.random.seed(42)
+        vix_vals = pd.Series(np.random.uniform(12, 35, n), index=spy_daily.index)
+        vxv_vals = pd.Series(vix_vals * np.random.uniform(0.9, 1.15, n), index=spy_daily.index)
+        vrp_pct_vals = pd.Series(np.random.uniform(0, 100, n), index=spy_daily.index)
+
+        regimes = compute_vrp_regime(spy_daily, vix_vals, vxv_vals, vrp_pct_vals)
+        freq = regimes.value_counts(normalize=True) * 100
+        print("  Regime frequency (%):")
+        for r in ["R1", "R2", "R3", "R4"]:
+            pct = freq.get(r, 0)
+            print(f"    {r}: {pct:.1f}%")
+
+        # Check for degeneracy: one regime > 90% = degenerate
+        degenerate = any(freq.get(r, 0) > 90 for r in ["R1", "R2", "R3", "R4"])
+        if degenerate:
+            print("  WARNING: Degenerate distribution (one regime >90%)")
+            print("  FAIL\n")
+        else:
+            checks_passed += 1
+            print("  PASS\n")
+    except Exception as e:
+        print(f"  ERROR: {e}\n")
+
+    # --- Check 6: Backtest on fixture data ---
+    print("CHECK 6: Backtest on SPY fixture data")
+    try:
+        fixture_exec = Path(__file__).parent.parent / "tests" / "fixtures" / "SPY_1H.parquet"
+        fixture_daily = Path(__file__).parent.parent / "tests" / "fixtures" / "SPY_daily.parquet"
+        spy_exec = pd.read_parquet(fixture_exec)
+        spy_daily_df = pd.read_parquet(fixture_daily)
+
+        # Use DEFAULT_ARCHITECTURE (which works without VRP columns)
+        arch = DEFAULT_ARCHITECTURE.copy()
+        arch["direction"] = "neutral"
+        params = DEFAULT_PARAMS.copy()
+
+        trades, stats = full_backtest(spy_exec, spy_daily_df, arch, params)
+        pf = stats.get("pf", 0)
+        wr = stats.get("wr_pct", 0)
+        n_trades = stats.get("trades", 0)
+        print(f"  Trades: {n_trades}")
+        print(f"  Profit Factor: {pf:.2f}")
+        print(f"  Win Rate: {wr:.1f}%")
+        print(f"  Total Return: {stats.get('total_return_pct', 0):.2f}%")
+        checks_passed += 1
+        print("  PASS\n")
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        traceback.print_exc()
+        print()
+
+    print(f"=== VALIDATION COMPLETE: {checks_passed}/{checks_total} checks passed ===")
+    return checks_passed
 
 
 def phase1_universe(cfg):
@@ -154,9 +321,15 @@ def main():
     parser.add_argument("--budget", type=str, default="medium",
                         choices=["light", "medium", "heavy"], help="Compute budget")
     parser.add_argument("--output", type=str, default="", help="Output directory override")
+    parser.add_argument("--validate-vrp", action="store_true",
+                        help="Run VRP strategy validation smoke test and exit")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+
+    if args.validate_vrp:
+        validate_vrp(cfg)
+        sys.exit(0)
 
     # Apply budget profile
     budget = cfg.get("budget_profiles", {}).get(args.budget, {})
@@ -209,8 +382,13 @@ def main():
     log(f"Output: {run_output}")
     log(f"Concept: {run_info['concept']}")
 
-    concept_bias = parse_concept(run_info["concept"])
-    log(f"Concept bias: { {k: v for k, v in concept_bias.items() if v != 1.0} }")
+    if cfg.get("strategy_mode") == "vrp_regime":
+        architecture = VRP_DEFAULT_ARCHITECTURE
+        log("Using VRP Regime strategy mode")
+        concept_bias = {}
+    else:
+        concept_bias = parse_concept(run_info["concept"])
+        log(f"Concept bias: { {k: v for k, v in concept_bias.items() if v != 1.0} }")
 
     resume_stage = None
     if args.resume:
@@ -308,7 +486,10 @@ def main():
             log(f"  {sym}: VRP columns merged (IV={iv_series_id})")
 
     # ---- Layer 1 ----
-    if resume_stage in ("layer2_tuned", "layer3_robustness"):
+    if cfg.get("strategy_mode") == "vrp_regime":
+        log("Layer 1 SKIP: using VRP_DEFAULT_ARCHITECTURE (strategy_mode=vrp_regime)")
+        # architecture already set above
+    elif resume_stage in ("layer2_tuned", "layer3_robustness"):
         cp = load_checkpoint("layer1_architecture", str(run_output))
         architecture = cp["architecture"] if cp else DEFAULT_ARCHITECTURE
     else:

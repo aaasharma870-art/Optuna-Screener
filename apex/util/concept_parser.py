@@ -62,6 +62,41 @@ INDICATOR_REGISTRY = {
         "params": {"ema_fast": (5, 15), "ema_slow": (18, 50)},
         "signal_type": "crossover",
     },
+    "VPIN": {
+        "compute": "compute_vpin",
+        "params": {
+            "vpin_buckets_per_day": (20, 100),
+            "vpin_window_buckets": (20, 100),
+            "vpin_threshold_pct": (50, 80),
+        },
+        "signal_type": "microstructure",
+    },
+    "VWCLV": {
+        "compute": "compute_vwclv",
+        "params": {
+            "vwclv_cum_window": (3, 10),
+            "vwclv_divergence_threshold": (0.5, 2.0),
+        },
+        "signal_type": "order_flow",
+    },
+    "VWAP_Bands": {
+        "compute": "compute_vwap_bands",
+        "params": {},
+        "signal_type": "level",
+    },
+    "FVG": {
+        "compute": "detect_fvgs",
+        "params": {},
+        "signal_type": "structure",
+    },
+    "RSI2": {
+        "compute": "compute_rsi",
+        "params": {
+            "rsi2_oversold": (5, 20),
+            "rsi2_overbought": (80, 95),
+        },
+        "signal_type": "extreme_exhaustion",
+    },
 }
 
 

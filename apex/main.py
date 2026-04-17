@@ -450,35 +450,125 @@ def main():
             "direction": "long",
         }
 
-        # Skip Layer 2 — run strategy directly on each symbol
-        log("=== STRATEGY BACKTEST (user entry/exit logic) ===")
-        tuned_results = {}
-        for idx, sym in enumerate(survivors, 1):
-            log(f"  [{idx}/{len(survivors)}] Backtesting {sym}...")
-            sym_data = data_dict[sym]
-            df = sym_data.get("exec_df")
-            if df is None or len(df) < 100:
-                continue
+        # Layer 2: Parameter tuning (if TUNABLE_PARAMS defined)
+        from apex.optimize.layer1 import _compute_fitness
 
-            trades, stats = strategy_full_backtest(adapter, df, spy_exec_df, sym)
-            trade_pnls = [t["pnl_pct"] for t in trades]
+        if adapter.tunable_params:
+            import optuna
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+            deep_trials = cfg.get("optimization", {}).get("deep_trials", 50)
+            oos_pct = cfg.get("optimization", {}).get("walk_forward_oos_pct", 0.30)
+            is_w = cfg.get("optimization", {}).get("fitness_is_weight", 0.4)
+            oos_w = cfg.get("optimization", {}).get("fitness_oos_weight", 0.6)
 
-            if stats["trades"] < 3:
-                log(f"    {sym}: SKIP ({stats['trades']} trades)")
-                continue
+            log(f"=== LAYER 2: Strategy Parameter Tuning ({deep_trials} trials/symbol) ===")
+            log(f"  Tunable params: {list(adapter.tunable_params.keys())}")
 
-            from apex.optimize.layer1 import _compute_fitness
-            fitness = _compute_fitness(stats)
+            tuned_results = {}
+            for idx, sym in enumerate(survivors, 1):
+                log(f"  [{idx}/{len(survivors)}] Tuning {sym}...")
+                sym_data = data_dict[sym]
+                df = sym_data.get("exec_df")
+                if df is None or len(df) < 100:
+                    continue
 
-            tuned_results[sym] = {
-                "params": {},
-                "stats": stats,
-                "trades": trades,
-                "trade_pnls": trade_pnls,
-                "fitness": fitness,
-            }
-            log(f"    {sym}: {stats['trades']}tr PF={stats['pf']:.2f} "
-                f"WR={stats['wr_pct']:.1f}% Ret={stats['total_return_pct']:.1f}%")
+                # Walk-forward split
+                cut = int(len(df) * (1.0 - oos_pct))
+                df_is = df.iloc[:cut].reset_index(drop=True)
+                df_oos = df.iloc[cut:].reset_index(drop=True)
+
+                # Pre-prepare DataFrames
+                prep_is = adapter.prepare_df(df_is, spy_df=spy_exec_df, sym=sym)
+                prep_oos = adapter.prepare_df(df_oos, spy_df=spy_exec_df, sym=sym)
+
+                best_fitness = -999.0
+                best_params = dict(adapter.default_params)
+                best_trades = []
+                best_stats = {}
+
+                def objective(trial):
+                    trial_params = {}
+                    for pname, (lo, hi) in adapter.tunable_params.items():
+                        if isinstance(lo, float) or isinstance(hi, float):
+                            trial_params[pname] = trial.suggest_float(pname, float(lo), float(hi))
+                        else:
+                            trial_params[pname] = trial.suggest_int(pname, int(lo), int(hi))
+
+                    adapter.set_params(trial_params)
+
+                    from apex.engine.strategy_backtest import run_strategy_backtest
+                    trades_is, stats_is = run_strategy_backtest(adapter, prep_is, sym)
+                    trades_oos, stats_oos = run_strategy_backtest(adapter, prep_oos, sym)
+
+                    fit_is = _compute_fitness(stats_is)
+                    fit_oos = _compute_fitness(stats_oos)
+
+                    if fit_is <= 0 and fit_oos <= 0:
+                        return -999.0
+
+                    return is_w * max(fit_is, 0) + oos_w * max(fit_oos, 0)
+
+                study = optuna.create_study(direction="maximize",
+                    sampler=optuna.samplers.TPESampler(seed=42))
+                study.optimize(objective, n_trials=deep_trials, show_progress_bar=False)
+
+                # Apply best params and run on full tune window
+                if study.best_value > -900:
+                    best_trial_params = {}
+                    for pname, (lo, hi) in adapter.tunable_params.items():
+                        best_trial_params[pname] = study.best_params.get(pname,
+                            adapter.default_params.get(pname, lo))
+                    adapter.set_params(best_trial_params)
+                    best_params = dict(adapter.module.PARAMS)
+
+                trades, stats = strategy_full_backtest(adapter, df, spy_exec_df, sym)
+                trade_pnls = [t["pnl_pct"] for t in trades]
+
+                if stats["trades"] < 3:
+                    log(f"    {sym}: SKIP ({stats['trades']} trades)")
+                    adapter.reset_params()
+                    continue
+
+                fitness = _compute_fitness(stats)
+                tuned_results[sym] = {
+                    "params": best_params,
+                    "stats": stats,
+                    "trades": trades,
+                    "trade_pnls": trade_pnls,
+                    "fitness": fitness,
+                }
+                log(f"    {sym}: {stats['trades']}tr PF={stats['pf']:.2f} "
+                    f"WR={stats['wr_pct']:.1f}% Ret={stats['total_return_pct']:.1f}%")
+                adapter.reset_params()
+
+        else:
+            # No tunable params — run strategy directly
+            log("=== STRATEGY BACKTEST (user entry/exit logic, no tuning) ===")
+            tuned_results = {}
+            for idx, sym in enumerate(survivors, 1):
+                log(f"  [{idx}/{len(survivors)}] Backtesting {sym}...")
+                sym_data = data_dict[sym]
+                df = sym_data.get("exec_df")
+                if df is None or len(df) < 100:
+                    continue
+
+                trades, stats = strategy_full_backtest(adapter, df, spy_exec_df, sym)
+                trade_pnls = [t["pnl_pct"] for t in trades]
+
+                if stats["trades"] < 3:
+                    log(f"    {sym}: SKIP ({stats['trades']} trades)")
+                    continue
+
+                fitness = _compute_fitness(stats)
+                tuned_results[sym] = {
+                    "params": {},
+                    "stats": stats,
+                    "trades": trades,
+                    "trade_pnls": trade_pnls,
+                    "fitness": fitness,
+                }
+                log(f"    {sym}: {stats['trades']}tr PF={stats['pf']:.2f} "
+                    f"WR={stats['wr_pct']:.1f}% Ret={stats['total_return_pct']:.1f}%")
 
         if not tuned_results:
             log("No symbols produced trades. Exiting.", "ERROR")

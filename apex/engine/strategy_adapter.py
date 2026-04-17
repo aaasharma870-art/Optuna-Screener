@@ -182,10 +182,25 @@ class StrategyAdapter:
         # Optional tunable params for Optuna Layer 2
         self.tunable_params = getattr(self.module, "TUNABLE_PARAMS", {})
 
+        # Store default params for reset
+        self.default_params = dict(getattr(self.module, "PARAMS", {}))
+
         # Optional config
         self.capital = getattr(self.module, "CAPITAL", 100000)
         self.pos_pct = 0.25
         self.max_positions = getattr(self.module, "MAX_POS", 5)
+
+    def set_params(self, params):
+        """Inject tuned parameters into the strategy module's PARAMS dict."""
+        if hasattr(self.module, "PARAMS"):
+            for k, v in params.items():
+                if k in self.module.PARAMS:
+                    self.module.PARAMS[k] = v
+
+    def reset_params(self):
+        """Reset strategy parameters to defaults."""
+        if hasattr(self.module, "PARAMS"):
+            self.module.PARAMS.update(self.default_params)
 
     def prepare_df(self, polygon_df, spy_df=None, sym="UNKNOWN"):
         """Prepare a DataFrame with all indicators from Polygon data."""

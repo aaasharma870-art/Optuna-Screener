@@ -1,4 +1,4 @@
-"""Correlation filter and full final backtest (tune + true holdout)."""
+"""Correlation filter, basket alignment, and full final backtest (tune + true holdout)."""
 
 import pandas as pd
 
@@ -7,6 +7,53 @@ from apex.engine.backtest import full_backtest, compute_stats
 from apex.util.sector_map import SECTOR_MAP
 from apex.config import FORCED_SYMBOLS
 from apex.data.polygon_client import fetch_daily
+
+
+def compute_basket_alignment(basket, as_of, short_days=21,
+                              long_days=63, alignment_threshold=3,
+                              size_multiplier=1.25):
+    """
+    Blended momentum = 0.5 * ret_short + 0.5 * ret_long per symbol.
+
+    Uses data STRICTLY before as_of (look-ahead safe).
+    If max(positive_count, negative_count) >= alignment_threshold -> return size_multiplier.
+    Else -> return 1.0.
+    """
+    positive_count = 0
+    negative_count = 0
+
+    for sym, df in basket.items():
+        # Use only data strictly before as_of
+        mask = df["datetime"] < as_of
+        hist = df.loc[mask]
+
+        if len(hist) < long_days + 1:
+            continue
+
+        closes = hist["close"].values
+
+        # Short-term return: last short_days
+        if len(closes) >= short_days + 1:
+            ret_short = (closes[-1] / closes[-(short_days + 1)]) - 1.0
+        else:
+            ret_short = 0.0
+
+        # Long-term return: last long_days
+        if len(closes) >= long_days + 1:
+            ret_long = (closes[-1] / closes[-(long_days + 1)]) - 1.0
+        else:
+            ret_long = 0.0
+
+        blended = 0.5 * ret_short + 0.5 * ret_long
+
+        if blended > 0:
+            positive_count += 1
+        elif blended < 0:
+            negative_count += 1
+
+    if max(positive_count, negative_count) >= alignment_threshold:
+        return size_multiplier
+    return 1.0
 
 
 def correlation_filter(validated_results, cfg):

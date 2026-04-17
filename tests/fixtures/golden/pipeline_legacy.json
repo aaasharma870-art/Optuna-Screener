@@ -1,0 +1,32 @@
+{
+  "stats": {
+    "trades": 2,
+    "pf": 1.41,
+    "wr_pct": 50.0,
+    "total_return_pct": 0.61,
+    "max_dd_pct": 1.57,
+    "sharpe": 0.241,
+    "sortino": 0.361,
+    "edge_ratio": 1.606,
+    "avg_bars_held": 5.0,
+    "avg_pnl": 0.3225,
+    "avg_win": 2.2179,
+    "avg_loss": -1.5729,
+    "largest_win": 2.2179,
+    "largest_loss": -1.5729,
+    "regime_exit_count": 0,
+    "exit_reason_counts": {
+      "fixed_target": 1,
+      "fixed_stop": 1
+    },
+    "r1_trades": 2,
+    "r2_trades": 0,
+    "r3_trades": 0,
+    "r4_trades": 0
+  },
+  "trade_count": 2,
+  "trade_pnls": [
+    2.2179,
+    -1.5729
+  ]
+}

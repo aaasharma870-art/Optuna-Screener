@@ -2,7 +2,10 @@
 
 > An end-to-end Python pipeline that automatically discovers, optimizes, and validates
 > systematic trading strategies using real market data, hyperparameter search, and
-> Monte Carlo robustness testing.
+> Monte Carlo robustness testing. **v2** adds a Variance Risk Premium (VRP)
+> regime-adaptive strategy mode, long/short execution, VPIN/VWCLV microstructure
+> indicators, cross-asset basket momentum, multi-objective Pareto optimization, and
+> synthetic Monte Carlo with CPCV/DSR/PBO validation.
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -254,6 +257,21 @@ python apex.py --no-amibroker
 **5. Open the report.** At the end of the run the HTML report auto-opens in your
 default browser. The output directory also contains `trades.csv`, `summary.csv`,
 `parameters.json`, and an `OptunaScreener_Strategy.afl` file.
+
+### VRP Strategy Mode
+
+The v2 overhaul adds a Variance Risk Premium (VRP) regime-adaptive strategy. To use it:
+
+1. Get a free FRED API key at [fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html)
+2. Set `FRED_API_KEY` in your `.env` file
+3. Set `"strategy_mode": "vrp_regime"` in `apex_config.json`
+4. Run validation: `python apex.py --validate-vrp`
+5. Run the pipeline: `python apex.py --budget light`
+
+The VRP strategy classifies market regimes into four states (R1-R4) based on
+VIX term structure and Variance Risk Premium percentile, then executes
+direction-gated trades: mean-reversion fades in suppressed vol (R1/R2),
+trend-following in amplified regimes (R3), and no-trade in crisis (R4).
 
 ## Example Output
 

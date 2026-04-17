@@ -99,15 +99,30 @@ def deep_tune_objective(trial, sym, df_dict, architecture, cfg):
     return fitness
 
 
-def layer2_deep_tune(data_dict, architecture, survivors, cfg):
+def layer2_deep_tune(data_dict, architecture, survivors, cfg, basket=None):
     """
     Layer 2: per-symbol deep parameter optimization.
 
     Runs an Optuna study per symbol with TPE sampler.
     Returns dict of {sym: {"params": best_params, "stats": stats, ...}}.
+
+    When *basket* is provided (dict[symbol] -> DataFrame from cross_asset.fetch_basket),
+    each trade's pnl_pct is scaled by the basket alignment multiplier computed as of
+    the trade's entry date.
     """
     deep_trials = cfg.get("optimization", {}).get("deep_trials", 100)
     log(f"=== LAYER 2: Deep Parameter Optimization ({deep_trials} trials/symbol) ===")
+
+    # Cross-asset basket config
+    basket_cfg = cfg.get("cross_asset_basket", {})
+    if basket is not None:
+        from apex.engine.portfolio import compute_basket_alignment
+        short_days = basket_cfg.get("momentum_short_days", 21)
+        long_days = basket_cfg.get("momentum_long_days", 63)
+        align_thresh = basket_cfg.get("alignment_threshold", 3)
+        size_mult = basket_cfg.get("size_multiplier", 1.25)
+        log(f"  Basket alignment enabled: {list(basket.keys())}, "
+            f"threshold={align_thresh}, mult={size_mult}")
 
     results = {}
     for idx, sym in enumerate(survivors, 1):
@@ -137,6 +152,24 @@ def layer2_deep_tune(data_dict, architecture, survivors, cfg):
         trades, stats = full_backtest(df, daily_df, architecture, best_params)
 
         trade_pnls = [t["pnl_pct"] for t in trades]
+
+        # Apply basket alignment scaling when basket is provided
+        if basket is not None:
+            scaled_pnls = []
+            for t in trades:
+                as_of = t.get("entry_datetime")
+                if as_of is not None:
+                    mult = compute_basket_alignment(
+                        basket, as_of,
+                        short_days=short_days,
+                        long_days=long_days,
+                        alignment_threshold=align_thresh,
+                        size_multiplier=size_mult,
+                    )
+                else:
+                    mult = 1.0
+                scaled_pnls.append(t["pnl_pct"] * mult)
+            trade_pnls = scaled_pnls
 
         results[sym] = {
             "params": best_params,

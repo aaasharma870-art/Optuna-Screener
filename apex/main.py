@@ -314,6 +314,18 @@ def main():
     else:
         architecture = layer1_architecture_search(data_dict, concept_bias, cfg)
 
+    # ---- Cross-Asset Basket (opt-in) ----
+    basket = None
+    basket_cfg = cfg.get("cross_asset_basket", {})
+    if basket_cfg.get("enabled", False):
+        from apex.data.cross_asset import fetch_basket
+        basket_symbols = basket_cfg.get("symbols")
+        log("=== CROSS-ASSET BASKET MOMENTUM ===")
+        basket = fetch_basket(basket_symbols)
+        if not basket:
+            log("Basket fetch returned empty, disabling basket alignment", "WARN")
+            basket = None
+
     # ---- Layer 2 ----
     if resume_stage == "layer3_robustness":
         cp = load_checkpoint("layer2_tuned", str(run_output))
@@ -328,7 +340,8 @@ def main():
                 sym_result["trade_pnls"] = [t["pnl_pct"] for t in trades]
                 sym_result["stats"] = stats
     else:
-        tuned_results = layer2_deep_tune(data_dict, architecture, survivors, cfg)
+        tuned_results = layer2_deep_tune(data_dict, architecture, survivors, cfg,
+                                          basket=basket)
 
     if not tuned_results:
         log("No symbols survived Layer 2. Exiting.", "ERROR")

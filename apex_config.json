@@ -64,6 +64,15 @@
         "bars_per_day_5min": 78
     },
 
+    "cross_asset_basket": {
+        "enabled": false,
+        "symbols": ["SPY", "QQQ", "GLD", "USO", "IEF"],
+        "momentum_short_days": 21,
+        "momentum_long_days": 63,
+        "alignment_threshold": 3,
+        "size_multiplier": 1.25
+    },
+
     "amibroker": {
         "database_path": "C:\\AmiBroker\\Data",
         "formulas_path": "C:\\Program Files\\AmiBroker\\Formulas\\Custom"

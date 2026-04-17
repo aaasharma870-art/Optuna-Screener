@@ -58,7 +58,15 @@ def load_config(path="apex_config.json"):
         print(f"[ERROR] Config file not found: {path}")
         sys.exit(1)
     with open(full_path, "r") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    # Environment variable overrides
+    env_polygon = os.environ.get("POLYGON_API_KEY")
+    if env_polygon:
+        cfg["polygon_api_key"] = env_polygon
+    env_fred = os.environ.get("FRED_API_KEY")
+    if env_fred:
+        cfg["fred_api_key"] = env_fred
+    return cfg
 
 
 CFG = load_config()

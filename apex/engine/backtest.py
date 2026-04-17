@@ -10,6 +10,7 @@ from apex.indicators.basics import (
     compute_stochastic, compute_obv, compute_adx, compute_cci,
     compute_williams_r, compute_keltner, compute_volume_surge, compute_vwap,
 )
+from apex.engine.fees import borrow_fee_from_bars, lookup_borrow_rate
 
 
 def compute_indicator_signals(df, architecture, params):
@@ -284,16 +285,33 @@ def compute_entry_score(signals, regime, architecture, params):
     return score.astype(int)
 
 
+def _inject_exec_params(params, config=None):
+    """Inject symbol, borrow_rate, bars_per_day into params from config.
+
+    Non-destructive: returns a new dict so the caller's params are unchanged.
+    """
+    merged = dict(params)
+    if config is None:
+        config = {}
+    borrow_rates = config.get("borrow_rates", {"default": 0.02})
+    execution = config.get("execution", {})
+    symbol = merged.get("symbol", "")
+    merged.setdefault("borrow_rate", lookup_borrow_rate(symbol, borrow_rates))
+    merged.setdefault("bars_per_day", execution.get("bars_per_day_1h", 7))
+    return merged
+
+
 def run_backtest(df, signals_data, architecture, params):
     """
-    Bar-by-bar long-only backtest engine with multiple simultaneous exit methods.
+    Bar-by-bar direction-aware backtest engine with multiple simultaneous exit
+    methods.  Supports long, short, and neutral (both sides) execution.
 
-    Iterates through the execution-timeframe DataFrame.  Enters long when the
+    Iterates through the execution-timeframe DataFrame.  Enters when the
     composite score >= min_score AND regime != R4.  Tracks MFE/MAE and handles
     the following exit methods simultaneously (first trigger wins):
 
-      - ``"fixed_target"``:  exit at entry + atr_target_mult * ATR
-      - ``"fixed_stop"``:    exit at entry - atr_stop_mult * ATR
+      - ``"fixed_target"``:  exit at entry +/- atr_target_mult * ATR
+      - ``"fixed_stop"``:    exit at entry -/+ atr_stop_mult * ATR
       - ``"trailing_stop"``: chandelier trail, activates after trail_activate_atr
       - ``"regime_exit"``:   forced exit when regime transitions to R4
       - ``"time_exit"``:     forced exit after max_hold_bars
@@ -302,6 +320,7 @@ def run_backtest(df, signals_data, architecture, params):
 
     Returns (trades_list, stats_dict).
     """
+    direction = architecture.get("direction", "long")
     min_score = architecture.get("min_score", 5)
     exit_methods = architecture.get("exit_methods", ["trailing_stop", "regime_exit", "time_exit"])
 
@@ -311,6 +330,8 @@ def run_backtest(df, signals_data, architecture, params):
     trail_activate_atr = params.get("trail_activate_atr", 1.0)
     max_hold_bars = params.get("max_hold_bars", 35)
     commission_pct = params.get("commission_pct", 0.05)
+    borrow_rate = params.get("borrow_rate", 0.0)
+    bars_per_day = params.get("bars_per_day", 7)
 
     regime = signals_data["regime"]
     score = signals_data["score"]
@@ -326,13 +347,26 @@ def run_backtest(df, signals_data, architecture, params):
     score_vals = score.values
     atr_vals = atr.values
 
-    # Entry condition: score >= min_score AND regime is not R4
-    entry_ok = np.array(
-        [(score_vals[i] >= min_score and regime_vals[i] != "R4" and
+    n = len(close)
+
+    # Build per-bar entry direction arrays
+    entry_long = np.zeros(n, dtype=bool)
+    entry_short = np.zeros(n, dtype=bool)
+
+    base_ok = np.array(
+        [(regime_vals[i] != "R4" and
           not np.isnan(atr_vals[i]) and atr_vals[i] > 0)
-         for i in range(len(close))],
+         for i in range(n)],
         dtype=bool,
     )
+
+    if direction == "long":
+        entry_long = base_ok & (score_vals >= min_score)
+    elif direction == "short":
+        entry_short = base_ok & (score_vals >= min_score)
+    elif direction == "neutral":
+        entry_long = base_ok & (score_vals >= min_score)
+        entry_short = base_ok & (score_vals <= -min_score)
 
     use_fixed_target = "fixed_target" in exit_methods
     use_fixed_stop = "fixed_stop" in exit_methods or "trailing_stop" in exit_methods
@@ -356,16 +390,30 @@ def run_backtest(df, signals_data, architecture, params):
     entry_dt = None
     mfe = 0.0
     mae = 0.0
+    trade_dir = "long"
 
-    for i in range(1, len(close)):
+    for i in range(1, n):
         if not in_pos:
             # Signal from prior bar fills at current bar's open (no look-ahead)
-            if entry_ok[i - 1]:
+            chosen_dir = None
+            if entry_long[i - 1]:
+                chosen_dir = "long"
+            elif entry_short[i - 1]:
+                chosen_dir = "short"
+
+            if chosen_dir is not None:
                 in_pos = True
+                trade_dir = chosen_dir
                 entry_price = open_[i]
                 entry_atr = atr_vals[i - 1]
-                stop_price = entry_price - atr_stop_mult * entry_atr
-                target_price = entry_price + atr_target_mult * entry_atr
+
+                if trade_dir == "long":
+                    stop_price = entry_price - atr_stop_mult * entry_atr
+                    target_price = entry_price + atr_target_mult * entry_atr
+                else:  # short
+                    stop_price = entry_price + atr_stop_mult * entry_atr
+                    target_price = entry_price - atr_target_mult * entry_atr
+
                 trail_active = False
                 trail_stop = stop_price
                 high_since = high[i]
@@ -385,8 +433,12 @@ def run_backtest(df, signals_data, architecture, params):
             if low[i] < low_since:
                 low_since = low[i]
 
-            fav_pnl_pct = (high_since - entry_price) / entry_price * 100.0
-            adv_pnl_pct = (low_since - entry_price) / entry_price * 100.0
+            if trade_dir == "long":
+                fav_pnl_pct = (high_since - entry_price) / entry_price * 100.0
+                adv_pnl_pct = (low_since - entry_price) / entry_price * 100.0
+            else:  # short
+                fav_pnl_pct = (entry_price - low_since) / entry_price * 100.0
+                adv_pnl_pct = (entry_price - high_since) / entry_price * 100.0
 
             if fav_pnl_pct > mfe:
                 mfe = fav_pnl_pct
@@ -395,52 +447,93 @@ def run_backtest(df, signals_data, architecture, params):
 
             exit_reason = None
 
-            # 1) Fixed stop
-            if use_fixed_stop and exit_reason is None:
-                if low[i] <= stop_price:
-                    exit_reason = "fixed_stop"
+            if trade_dir == "long":
+                # 1) Fixed stop — long: low breaches stop below
+                if use_fixed_stop and exit_reason is None:
+                    if low[i] <= stop_price:
+                        exit_reason = "fixed_stop"
 
-            # 2) Fixed target
-            if use_fixed_target and exit_reason is None:
-                if high[i] >= target_price:
-                    exit_reason = "fixed_target"
+                # 2) Fixed target — long: high breaches target above
+                if use_fixed_target and exit_reason is None:
+                    if high[i] >= target_price:
+                        exit_reason = "fixed_target"
 
-            # 3) Trailing stop (chandelier)
-            if use_trailing and exit_reason is None:
-                gain_in_atr = (close[i] - entry_price) / entry_atr if entry_atr > 0 else 0.0
-                if gain_in_atr >= trail_activate_atr:
-                    trail_active = True
-                if trail_active:
-                    new_trail = high_since - atr_trail_mult * entry_atr
-                    if new_trail > trail_stop:
-                        trail_stop = new_trail
-                    if low[i] <= trail_stop:
-                        exit_reason = "trailing_stop"
+                # 3) Trailing stop (chandelier) — long
+                if use_trailing and exit_reason is None:
+                    gain_in_atr = (close[i] - entry_price) / entry_atr if entry_atr > 0 else 0.0
+                    if gain_in_atr >= trail_activate_atr:
+                        trail_active = True
+                    if trail_active:
+                        new_trail = high_since - atr_trail_mult * entry_atr
+                        if new_trail > trail_stop:
+                            trail_stop = new_trail
+                        if low[i] <= trail_stop:
+                            exit_reason = "trailing_stop"
+            else:
+                # 1) Fixed stop — short: high breaches stop above
+                if use_fixed_stop and exit_reason is None:
+                    if high[i] >= stop_price:
+                        exit_reason = "fixed_stop"
 
-            # 4) Regime exit
+                # 2) Fixed target — short: low breaches target below
+                if use_fixed_target and exit_reason is None:
+                    if low[i] <= target_price:
+                        exit_reason = "fixed_target"
+
+                # 3) Trailing stop (chandelier) — short: trail moves DOWN
+                if use_trailing and exit_reason is None:
+                    gain_in_atr = (entry_price - close[i]) / entry_atr if entry_atr > 0 else 0.0
+                    if gain_in_atr >= trail_activate_atr:
+                        trail_active = True
+                    if trail_active:
+                        new_trail = low_since + atr_trail_mult * entry_atr
+                        if new_trail < trail_stop:
+                            trail_stop = new_trail
+                        if high[i] >= trail_stop:
+                            exit_reason = "trailing_stop"
+
+            # 4) Regime exit (same for both directions)
             if use_regime_exit and exit_reason is None:
                 if regime_vals[i] == "R4":
                     exit_reason = "regime_exit"
 
-            # 5) Time exit
+            # 5) Time exit (same for both directions)
             if use_time_exit and exit_reason is None:
                 if bars_held >= max_hold_bars:
                     exit_reason = "time_exit"
 
             if exit_reason is not None:
-                if exit_reason == "fixed_target":
-                    exit_price = target_price
-                elif exit_reason == "fixed_stop":
-                    exit_price = stop_price
-                elif exit_reason == "trailing_stop":
-                    exit_price = trail_stop
-                else:
-                    exit_price = close[i]
+                if trade_dir == "long":
+                    if exit_reason == "fixed_target":
+                        exit_price = target_price
+                    elif exit_reason == "fixed_stop":
+                        exit_price = stop_price
+                    elif exit_reason == "trailing_stop":
+                        exit_price = trail_stop
+                    else:
+                        exit_price = close[i]
+                else:  # short
+                    if exit_reason == "fixed_target":
+                        exit_price = target_price
+                    elif exit_reason == "fixed_stop":
+                        exit_price = stop_price
+                    elif exit_reason == "trailing_stop":
+                        exit_price = trail_stop
+                    else:
+                        exit_price = close[i]
 
                 # Clamp exit price to bar range
                 exit_price = max(low[i], min(high[i], exit_price))
 
-                pnl_pct = (exit_price - entry_price) / entry_price * 100.0
+                if trade_dir == "long":
+                    pnl_pct = (exit_price - entry_price) / entry_price * 100.0
+                else:  # short
+                    borrow_cost = borrow_fee_from_bars(
+                        entry_price, borrow_rate, bars_held, bars_per_day
+                    )
+                    borrow_fee_pct = (borrow_cost / entry_price) * 100.0
+                    pnl_pct = (entry_price - exit_price) / entry_price * 100.0 - borrow_fee_pct
+
                 net_pnl_pct = pnl_pct - 2.0 * commission_pct
 
                 trades.append({
@@ -459,7 +552,7 @@ def run_backtest(df, signals_data, architecture, params):
                     "entry_regime": entry_regime,
                     "entry_atr": round(entry_atr, 4),
                     "entry_score": int(score_vals[entry_idx]),
-                    "direction": "long",
+                    "direction": trade_dir,
                 })
                 in_pos = False
 
@@ -617,6 +710,7 @@ DEFAULT_ARCHITECTURE = {
     "exec_timeframe": "1H",
     "score_aggregation": "additive",
     "concept_weights": {},
+    "direction": "long",
 }
 
 DEFAULT_PARAMS = {

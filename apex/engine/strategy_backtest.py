@@ -52,6 +52,12 @@ def run_strategy_backtest(adapter, prepared_df, sym, commission_pct=0.05):
 
         # --- Check exit first ---
         if position is not None:
+            # Update high/low tracking BEFORE exit check (this bar's range matters)
+            if r["High"] > position.get("highest", position["ep"]):
+                position["highest"] = r["High"]
+            if r["Low"] < position.get("lowest", position["ep"]):
+                position["lowest"] = r["Low"]
+
             try:
                 should_exit, exit_price, reason = adapter.exit_fn(r, prev, position, df, idx)
             except Exception:
@@ -67,8 +73,8 @@ def run_strategy_backtest(adapter, prepared_df, sym, commission_pct=0.05):
                 net_pnl_pct = pnl_pct - 2.0 * commission_pct
 
                 # MFE / MAE from tracked extremes
-                highest = position.get("highest", entry_price)
-                lowest = position.get("lowest", entry_price)
+                highest = position["highest"]
+                lowest = position["lowest"]
                 if position.get("dir", "L") == "L":
                     mfe = (highest - entry_price) / entry_price * 100.0
                     mae = (lowest - entry_price) / entry_price * 100.0
@@ -91,19 +97,11 @@ def run_strategy_backtest(adapter, prepared_df, sym, commission_pct=0.05):
                     "exit_reason": reason,
                     "entry_regime": "R1",
                     "entry_atr": round(position.get("entry_atr", 0), 4),
-                    "entry_score": int(position.get("score", 0)),
+                    "entry_score": round(position.get("score", 0), 2),
                     "direction": "long" if position.get("dir", "L") == "L" else "short",
                 })
                 position = None
                 continue
-
-            # Update trailing highs/lows
-            if position.get("dir", "L") == "L":
-                if r["High"] > position.get("highest", position["ep"]):
-                    position["highest"] = r["High"]
-            else:
-                if r["Low"] < position.get("lowest", position["ep"]):
-                    position["lowest"] = r["Low"]
 
         # --- Check entry ---
         if position is None:

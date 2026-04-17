@@ -149,9 +149,14 @@ def phase_full_backtest(data_dict, architecture, final_results, cfg, tuned_resul
             continue
 
         if strategy_adapter is not None:
+            # Re-apply per-symbol tuned params before backtesting
+            if params:
+                strategy_adapter.set_params(params)
             spy_data = data_dict.get("SPY", data_dict.get("_spy_data", {}))
             spy_df = spy_data.get("exec_df") if isinstance(spy_data, dict) else None
             trades, stats = strategy_full_backtest(strategy_adapter, df, spy_df, sym)
+            if params:
+                strategy_adapter.reset_params()
         else:
             trades, stats = full_backtest(df, daily_df, architecture, params)
 
@@ -168,11 +173,15 @@ def phase_full_backtest(data_dict, architecture, final_results, cfg, tuned_resul
         holdout_trades, holdout_stats = [], {}
         if holdout_df is not None and len(holdout_df) >= 50:
             if strategy_adapter is not None:
+                if params:
+                    strategy_adapter.set_params(params)
                 spy_data = data_dict.get("SPY", data_dict.get("_spy_data", {}))
                 spy_df = spy_data.get("exec_df_holdout") if isinstance(spy_data, dict) else None
                 holdout_trades, holdout_stats = strategy_full_backtest(
                     strategy_adapter, holdout_df, spy_df, sym
                 )
+                if params:
+                    strategy_adapter.reset_params()
             else:
                 holdout_trades, holdout_stats = full_backtest(
                     holdout_df, holdout_daily, architecture, params

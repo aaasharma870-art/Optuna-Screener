@@ -1,15 +1,22 @@
 {
-    "polygon_api_key": "YOUR_POLYGON_API_KEY_HERE",
+    "polygon_api_key": "i2G48KgZOdi2QJdxXIGrkwiUyzDeQg8_",
     "cache_dir": "apex_cache",
     "output_dir": "apex_results",
 
-    "target_symbols": ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN", "TSLA"],
+    "target_symbols": [
+        "SPY", "QQQ",
+        "FIX", "ANAB", "ECO", "VRT", "AUGO", "FN", "VIST", "ARIS", "MOD", "AGX",
+        "PAHC", "KNSA", "ORLA", "WWD", "AGI", "CF", "FIVE", "TVTX", "LITE", "LQDA",
+        "BBIO", "MTSI", "SEI", "SII", "BAP", "UI", "VG", "MRVL", "MPWR", "AMD",
+        "NYT", "PWR", "FNV", "MRX", "CW", "GMED", "LB", "TSEM", "SNEX", "TARS",
+        "DGII", "RSI", "ARM", "ROST", "ADI", "LSCC", "VNOM", "CGAU", "MTZ"
+    ],
 
     "universe": {
-        "min_price": 20,
+        "min_price": 15,
         "max_price": 5000,
-        "min_avg_volume": 2000000,
-        "min_daily_bars": 252
+        "min_avg_volume": 500000,
+        "min_daily_bars": 200
     },
 
     "timeframes": ["1H", "daily"],

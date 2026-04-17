@@ -57,6 +57,13 @@
         "min_1h_bars": 200
     },
 
+    "borrow_rates": {"default": 0.02},
+    "execution": {
+        "default_direction": "long",
+        "bars_per_day_1h": 7,
+        "bars_per_day_5min": 78
+    },
+
     "amibroker": {
         "database_path": "C:\\AmiBroker\\Data",
         "formulas_path": "C:\\Program Files\\AmiBroker\\Formulas\\Custom"

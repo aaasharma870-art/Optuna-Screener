@@ -4,6 +4,7 @@ import pandas as pd
 
 from apex.logging_util import log
 from apex.engine.backtest import full_backtest, compute_stats
+from apex.engine.strategy_backtest import strategy_full_backtest
 from apex.util.sector_map import SECTOR_MAP
 from apex.config import FORCED_SYMBOLS
 from apex.data.polygon_client import fetch_daily
@@ -119,7 +120,7 @@ def correlation_filter(validated_results, cfg):
     return final
 
 
-def phase_full_backtest(data_dict, architecture, final_results, cfg, tuned_results=None):
+def phase_full_backtest(data_dict, architecture, final_results, cfg, tuned_results=None, strategy_adapter=None):
     """
     Re-run backtest with final params on the FULL tune window AND the held-out
     final window that no optimization layer has ever touched.
@@ -147,7 +148,12 @@ def phase_full_backtest(data_dict, architecture, final_results, cfg, tuned_resul
         if df is None or len(df) < 100:
             continue
 
-        trades, stats = full_backtest(df, daily_df, architecture, params)
+        if strategy_adapter is not None:
+            spy_data = data_dict.get("SPY", data_dict.get("_spy_data", {}))
+            spy_df = spy_data.get("exec_df") if isinstance(spy_data, dict) else None
+            trades, stats = strategy_full_backtest(strategy_adapter, df, spy_df, sym)
+        else:
+            trades, stats = full_backtest(df, daily_df, architecture, params)
 
         survived = sym in survivor_set
         for t in trades:
@@ -161,9 +167,16 @@ def phase_full_backtest(data_dict, architecture, final_results, cfg, tuned_resul
         holdout_daily = sym_data.get("daily_df_holdout")
         holdout_trades, holdout_stats = [], {}
         if holdout_df is not None and len(holdout_df) >= 50:
-            holdout_trades, holdout_stats = full_backtest(
-                holdout_df, holdout_daily, architecture, params
-            )
+            if strategy_adapter is not None:
+                spy_data = data_dict.get("SPY", data_dict.get("_spy_data", {}))
+                spy_df = spy_data.get("exec_df_holdout") if isinstance(spy_data, dict) else None
+                holdout_trades, holdout_stats = strategy_full_backtest(
+                    strategy_adapter, holdout_df, spy_df, sym
+                )
+            else:
+                holdout_trades, holdout_stats = full_backtest(
+                    holdout_df, holdout_daily, architecture, params
+                )
             for t in holdout_trades:
                 t["symbol"] = sym
                 t["survived"] = survived

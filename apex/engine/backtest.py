@@ -204,6 +204,11 @@ def compute_regime(df, daily_df, regime_model, params):
             else:
                 regime.iloc[i] = "R3"
 
+    elif regime_model == "vrp":
+        from apex.regime.vrp_regime import compute_vrp_regime
+        # df must already have vix, vxv, vrp_pct columns (merged upstream)
+        regime = compute_vrp_regime(df, df["vix"], df["vxv"], df["vrp_pct"])
+
     else:
         # Default simple "ema" regime: EMA20 vs EMA50 on the execution timeframe
         ema20 = compute_ema(df["close"], 20)

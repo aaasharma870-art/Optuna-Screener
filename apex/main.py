@@ -6,6 +6,8 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
+
 from apex.config import CFG, OUTPUT_DIR, FORCED_SYMBOLS, load_config
 from apex.logging_util import log
 from apex.data.polygon_client import fetch_daily, fetch_bars
@@ -237,6 +239,73 @@ def main():
         log("No symbols have sufficient data. Exiting.", "ERROR")
         sys.exit(1)
     survivors = list(data_dict.keys())
+
+    # ---- VRP Data Merge (opt-in) ----
+    if cfg.get("strategy_mode") == "vrp_regime":
+        from apex.data.fred_client import fetch_fred_series, IV_MAP
+        from apex.regime.vrp import compute_vrp
+        log("=== VRP REGIME MODE: Fetching FRED implied-vol data ===")
+
+        # Determine date range from data
+        all_dates = []
+        for sym, sd in data_dict.items():
+            if sd["exec_df"] is not None and len(sd["exec_df"]) > 0:
+                all_dates.append(sd["exec_df"]["datetime"].iloc[0])
+                all_dates.append(sd["exec_df"]["datetime"].iloc[-1])
+        if all_dates:
+            fred_start = min(all_dates).strftime("%Y-%m-%d")
+            fred_end = max(all_dates).strftime("%Y-%m-%d")
+        else:
+            fred_start = "2020-01-01"
+            fred_end = "2026-12-31"
+
+        # Always fetch VIX and VXV for term structure
+        try:
+            vix_df = fetch_fred_series("VIXCLS", fred_start, fred_end)
+            vxv_df = fetch_fred_series("VXVCLS", fred_start, fred_end)
+        except RuntimeError as e:
+            log(f"FRED API key missing, skipping VRP merge: {e}", "WARN")
+            vix_df = pd.DataFrame(columns=["value"])
+            vxv_df = pd.DataFrame(columns=["value"])
+
+        for sym in list(data_dict.keys()):
+            sd = data_dict[sym]
+            iv_series_id = IV_MAP.get(sym, "VIXCLS")
+
+            try:
+                if iv_series_id in ("VIXCLS",):
+                    iv_df = vix_df
+                else:
+                    iv_df = fetch_fred_series(iv_series_id, fred_start, fred_end)
+            except RuntimeError:
+                iv_df = pd.DataFrame(columns=["value"])
+
+            if iv_df.empty or vix_df.empty or vxv_df.empty:
+                log(f"  {sym}: skipping VRP merge (missing FRED data)", "WARN")
+                continue
+
+            # Build daily close for RV computation from daily_df
+            daily_df = sd.get("daily_df")
+            if daily_df is None or len(daily_df) == 0:
+                continue
+
+            daily_close = daily_df.set_index("datetime")["close"]
+            iv_aligned = iv_df["value"].reindex(daily_close.index, method="ffill")
+
+            vrp_result = compute_vrp(iv_aligned, daily_close, rv_window=20, pct_window=252)
+
+            # Forward-fill daily columns onto exec bars
+            for target_key in ("exec_df", "exec_df_holdout"):
+                edf = sd.get(target_key)
+                if edf is None or len(edf) == 0:
+                    continue
+                bar_dates = edf["datetime"].dt.normalize()
+
+                edf["vix"] = vix_df["value"].reindex(bar_dates.values, method="ffill").values
+                edf["vxv"] = vxv_df["value"].reindex(bar_dates.values, method="ffill").values
+                edf["vrp_pct"] = vrp_result["vrp_pct"].reindex(bar_dates.values, method="ffill").values
+
+            log(f"  {sym}: VRP columns merged (IV={iv_series_id})")
 
     # ---- Layer 1 ----
     if resume_stage in ("layer2_tuned", "layer3_robustness"):

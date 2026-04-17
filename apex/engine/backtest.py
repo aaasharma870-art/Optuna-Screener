@@ -11,6 +11,8 @@ from apex.indicators.basics import (
     compute_williams_r, compute_keltner, compute_volume_surge, compute_vwap,
 )
 from apex.engine.fees import borrow_fee_from_bars, lookup_borrow_rate
+from apex.engine.stops import compute_dynamic_stop
+from apex.indicators.fvg import detect_fvgs
 
 
 def compute_indicator_signals(df, architecture, params):
@@ -427,6 +429,13 @@ def run_backtest(df, signals_data, architecture, params):
     borrow_rate = params.get("borrow_rate", 0.0)
     bars_per_day = params.get("bars_per_day", 7)
 
+    use_dynamic_stop = params.get("dynamic_stop", False)
+    dyn_atr_fallback = params.get("dynamic_stop_atr_fallback", 2.0)
+    dyn_fvg_buffer = params.get("dynamic_stop_fvg_buffer", 0.05)
+
+    # Pre-compute FVGs once for the whole series (only when needed)
+    fvgs = detect_fvgs(df) if use_dynamic_stop else []
+
     regime = signals_data["regime"]
     score = signals_data["score"]
     atr = signals_data["atr"]
@@ -508,6 +517,13 @@ def run_backtest(df, signals_data, architecture, params):
                     stop_price = entry_price + atr_stop_mult * entry_atr
                     target_price = entry_price - atr_target_mult * entry_atr
 
+                # Override initial stop with FVG-anchored dynamic stop
+                if use_dynamic_stop:
+                    stop_price = compute_dynamic_stop(
+                        trade_dir, entry_price, fvgs, i,
+                        entry_atr, dyn_atr_fallback, dyn_fvg_buffer,
+                    )
+
                 trail_active = False
                 trail_stop = stop_price
                 high_since = high[i]
@@ -538,6 +554,20 @@ def run_backtest(df, signals_data, architecture, params):
                 mfe = fav_pnl_pct
             if adv_pnl_pct < mae:
                 mae = adv_pnl_pct
+
+            # Dynamic FVG trailing: recompute each bar, only ratchet
+            if use_dynamic_stop:
+                cur_atr = atr_vals[i] if not np.isnan(atr_vals[i]) else entry_atr
+                new_dyn = compute_dynamic_stop(
+                    trade_dir, close[i], fvgs, i,
+                    cur_atr, dyn_atr_fallback, dyn_fvg_buffer,
+                )
+                if trade_dir == "long":
+                    if new_dyn > stop_price:
+                        stop_price = new_dyn
+                else:  # short: stop only moves down
+                    if new_dyn < stop_price:
+                        stop_price = new_dyn
 
             exit_reason = None
 

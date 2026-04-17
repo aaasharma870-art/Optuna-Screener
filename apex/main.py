@@ -23,6 +23,8 @@ from apex.report.amibroker import generate_apex_afl, push_to_amibroker
 from apex.util.concept_parser import parse_concept
 from apex.util.sector_map import SECTOR_MAP
 from apex.util.checkpoints import save_checkpoint, load_checkpoint
+from apex.engine.strategy_adapter import StrategyAdapter
+from apex.engine.strategy_backtest import strategy_full_backtest
 
 
 def validate_vrp(cfg):
@@ -323,6 +325,8 @@ def main():
     parser.add_argument("--output", type=str, default="", help="Output directory override")
     parser.add_argument("--validate-vrp", action="store_true",
                         help="Run VRP strategy validation smoke test and exit")
+    parser.add_argument("--strategy", type=str, default="",
+                        help="Path to a user strategy .py file (uses exact entry/exit logic)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -417,6 +421,140 @@ def main():
         log("No symbols have sufficient data. Exiting.", "ERROR")
         sys.exit(1)
     survivors = list(data_dict.keys())
+
+    # ---- STRATEGY MODE ----
+    if args.strategy:
+        adapter = StrategyAdapter(args.strategy)
+        log(f"Strategy mode: {adapter.name}")
+        log(f"Strategy file: {adapter.path}")
+
+        # Get SPY data for RS calculations
+        spy_data = data_dict.get("SPY", {})
+        spy_exec_df = spy_data.get("exec_df")
+
+        # Inject SPY reference and symbol name into data_dict for Layer 3
+        for sym in data_dict:
+            data_dict[sym]["_spy_df"] = spy_exec_df
+            data_dict[sym]["_sym"] = sym
+
+        # Skip Layer 1 — the strategy IS the architecture
+        architecture = {
+            "indicators": ["UserStrategy"],
+            "min_score": 1,
+            "exit_methods": ["user_strategy"],
+            "regime_model": "none",
+            "position_sizing": "equal",
+            "exec_timeframe": cfg.get("phase3_params", {}).get("exec_timeframe", "1H"),
+            "score_aggregation": "additive",
+            "concept_weights": {},
+            "direction": "long",
+        }
+
+        # Skip Layer 2 — run strategy directly on each symbol
+        log("=== STRATEGY BACKTEST (user entry/exit logic) ===")
+        tuned_results = {}
+        for idx, sym in enumerate(survivors, 1):
+            log(f"  [{idx}/{len(survivors)}] Backtesting {sym}...")
+            sym_data = data_dict[sym]
+            df = sym_data.get("exec_df")
+            if df is None or len(df) < 100:
+                continue
+
+            trades, stats = strategy_full_backtest(adapter, df, spy_exec_df, sym)
+            trade_pnls = [t["pnl_pct"] for t in trades]
+
+            if stats["trades"] < 3:
+                log(f"    {sym}: SKIP ({stats['trades']} trades)")
+                continue
+
+            from apex.optimize.layer1 import _compute_fitness
+            fitness = _compute_fitness(stats)
+
+            tuned_results[sym] = {
+                "params": {},
+                "stats": stats,
+                "trades": trades,
+                "trade_pnls": trade_pnls,
+                "fitness": fitness,
+            }
+            log(f"    {sym}: {stats['trades']}tr PF={stats['pf']:.2f} "
+                f"WR={stats['wr_pct']:.1f}% Ret={stats['total_return_pct']:.1f}%")
+
+        if not tuned_results:
+            log("No symbols produced trades. Exiting.", "ERROR")
+            sys.exit(1)
+
+        log(f"Strategy backtest complete: {len(tuned_results)} symbols with trades")
+
+        # Layer 3: Robustness
+        validated_results, robustness_data = layer3_robustness_gauntlet(
+            data_dict, architecture, tuned_results, cfg, strategy_adapter=adapter
+        )
+
+        if not validated_results:
+            log("No symbols passed robustness. Using all tuned results.", "WARN")
+            validated_results = tuned_results
+            for sym in validated_results:
+                validated_results[sym]["robustness"] = robustness_data.get(sym, {})
+
+        # Correlation filter
+        final_results = correlation_filter(validated_results, cfg)
+        if not final_results:
+            final_results = validated_results
+
+        # Final backtest (tune + holdout)
+        backtest_results = phase_full_backtest(
+            data_dict, architecture, final_results, cfg,
+            tuned_results=tuned_results, strategy_adapter=adapter
+        )
+
+        # Reports (same as normal pipeline)
+        log("=== GENERATING REPORTS ===")
+        run_info["concept"] = adapter.name
+        report_path = generate_html_report(
+            backtest_results, architecture, robustness_data, run_info, str(run_output)
+        )
+        generate_trades_csv(backtest_results.get("all_trades", []), str(run_output))
+        generate_summary_csv(backtest_results, str(run_output))
+        generate_parameters_json(backtest_results, architecture, str(run_output))
+
+        if not args.no_amibroker:
+            sorted_syms = backtest_results.get("sorted_syms", [])
+            afl_str = generate_apex_afl(sorted_syms, backtest_results, architecture)
+            push_to_amibroker(backtest_results, afl_str, str(run_output), cfg)
+        else:
+            log("AmiBroker push skipped (--no-amibroker)")
+
+        # Summary
+        log("=== PIPELINE COMPLETE ===")
+        pstats = backtest_results.get("portfolio_stats", {})
+        log("Final Results:")
+        log(f"  Strategy: {adapter.name}")
+        log(f"  Symbols: {len(backtest_results.get('sorted_syms', []))}")
+        log(f"  Trades:  {pstats.get('trades', 0)}")
+        log(f"  PF:      {pstats.get('pf', 0):.2f}")
+        log(f"  Win%:    {pstats.get('wr_pct', 0):.1f}%")
+        log(f"  Return:  {pstats.get('total_return_pct', 0):.1f}%")
+        log(f"  MaxDD:   {pstats.get('max_dd_pct', 0):.1f}%")
+        log(f"  Sharpe:  {pstats.get('sharpe', 0):.2f}")
+        hstats = backtest_results.get("holdout_universe_stats", {})
+        if hstats:
+            log("  --- TRUE HOLDOUT (never seen) ---")
+            log(f"  Holdout Trades:  {hstats.get('trades', 0)}")
+            log(f"  Holdout PF:      {hstats.get('pf', 0):.2f}")
+            log(f"  Holdout Win%:    {hstats.get('wr_pct', 0):.1f}%")
+            log(f"  Holdout Return:  {hstats.get('total_return_pct', 0):.1f}%")
+            log(f"  Holdout Sharpe:  {hstats.get('sharpe', 0):.2f}")
+        log(f"  Report:  {report_path}")
+
+        try:
+            abs_report = str(Path(report_path).resolve()).replace("\\", "/")
+            webbrowser.open(f"file:///{abs_report}")
+            log(f"Report opened in browser: file:///{abs_report}")
+        except Exception as e:
+            log(f"Could not open browser: {e}", "WARN")
+
+        return backtest_results
 
     # ---- VRP Data Merge (opt-in) ----
     if cfg.get("strategy_mode") == "vrp_regime":

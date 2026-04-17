@@ -1,10 +1,14 @@
 """Layer 3: Robustness gauntlet (Monte Carlo, noise, regime stress, sensitivity)."""
 
 import numpy as np
+import pandas as pd
 
 from apex.logging_util import log
 from apex.engine.backtest import full_backtest
 from apex.util.checkpoints import save_checkpoint
+from apex.validation.synthetic_mc import synthetic_price_mc, passes_synthetic_gate
+from apex.validation.dsr import deflated_sharpe_ratio
+from apex.validation.pbo import probability_of_backtest_overfitting
 
 
 def monte_carlo_validate(trade_pnls, n_sims=3000, initial_equity=10000):
@@ -217,6 +221,66 @@ def layer3_robustness_gauntlet(data_dict, architecture, tuned_results, cfg):
             "sensitivity_score": round(sensitivity_score, 4),
             "composite": round(composite, 4),
         }
+
+        # --- Validation suite (config-gated) ---
+        vcfg = cfg.get("validation", {})
+        robust_score = composite
+
+        # Synthetic MC gate
+        smc_cfg = vcfg.get("synthetic_mc", {})
+        if smc_cfg.get("enabled", False):
+            exec_df = sym_data.get("exec_df")
+            if exec_df is not None and "close" in exec_df.columns and len(exec_df) >= 20:
+                close_series = exec_df["close"]
+                smc_paths = synthetic_price_mc(
+                    close_series,
+                    n_paths=smc_cfg.get("n_paths", 1000),
+                    block_size=smc_cfg.get("block_size", 5),
+                )
+                final_prices = smc_paths[:, -1]
+                profitable = float(np.mean(final_prices > close_series.iloc[0]))
+                min_pct = smc_cfg.get("min_profitable_pct", 20)
+                smc_pass = passes_synthetic_gate(profitable, min_pass_pct=min_pct)
+                robustness_data[sym]["synthetic_mc_profitable_frac"] = round(profitable, 4)
+                robustness_data[sym]["synthetic_mc_pass"] = smc_pass
+                if not smc_pass:
+                    robust_score *= 0.5
+                    log(f"    {sym}: Synthetic MC FAIL ({profitable*100:.1f}% < {min_pct}%) -> score * 0.5")
+
+        # DSR computation
+        dsr_cfg = vcfg.get("dsr", {})
+        if dsr_cfg.get("enabled", False):
+            obs_sharpe = result.get("stats", {}).get("sharpe", 0.0)
+            n_trials_dsr = len(tuned_results)
+            sr_vals = [r.get("stats", {}).get("sharpe", 0.0) for r in tuned_results.values()]
+            sr_var = float(np.var(sr_vals)) if len(sr_vals) > 1 else 0.01
+            skew_val = float(np.mean([(s - np.mean(sr_vals))**3 for s in sr_vals]) / max(np.std(sr_vals)**3, 1e-12)) if len(sr_vals) > 2 else 0.0
+            n_samples = result.get("stats", {}).get("trades", 100)
+            dsr_val = deflated_sharpe_ratio(
+                observed_sr=obs_sharpe,
+                n_trials=max(n_trials_dsr, 2),
+                sr_variance=max(sr_var, 1e-6),
+                skew=skew_val,
+                kurtosis=3.0,
+                n_samples=max(n_samples, 2),
+            )
+            robustness_data[sym]["dsr"] = round(dsr_val, 4)
+            log(f"    {sym}: DSR = {dsr_val:.4f}")
+
+        # PBO (needs IS/OOS matrix from Layer 2)
+        pbo_cfg = vcfg.get("pbo", {})
+        if pbo_cfg.get("enabled", False):
+            is_oos = result.get("is_oos_matrix")
+            if is_oos is not None:
+                is_mat = np.array(is_oos.get("is_scores", []))
+                oos_mat = np.array(is_oos.get("oos_scores", []))
+                if is_mat.ndim == 2 and oos_mat.ndim == 2 and is_mat.shape[0] >= 2:
+                    pbo_val = probability_of_backtest_overfitting(is_mat, oos_mat)
+                    robustness_data[sym]["pbo"] = round(pbo_val, 4)
+                    log(f"    {sym}: PBO = {pbo_val:.4f}")
+
+        # Use adjusted score if validation penalised it
+        composite = robust_score
 
         log(f"    {sym}: MC={mc_score:.3f} Noise={noise_score:.3f} "
             f"Stress={stress_score:.3f} Sens={sensitivity_score:.3f} "

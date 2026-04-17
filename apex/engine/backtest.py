@@ -301,6 +301,100 @@ def _inject_exec_params(params, config=None):
     return merged
 
 
+def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
+    """Return 'long', 'short', or None based on VRP regime gating.
+
+    R1 (Suppressed Fade):
+      - long when RSI2 < oversold AND (VWCLV bullish divergence OR near VWAP-2sigma)
+      - short when RSI2 > overbought AND (VWCLV bearish divergence OR near VWAP+2sigma)
+      - Full size
+
+    R2 (Reduced Fade):
+      - Same logic as R1 but flagged as half-size
+
+    R3 (Amplified Trend):
+      - long when cum_vwclv > threshold AND vwap slope positive AND VPIN confirms
+      - short when cum_vwclv < -threshold AND vwap slope negative AND VPIN confirms
+
+    R4 (No Trade):
+      - Always returns None
+    """
+    if regime_val == "R4":
+        return None
+
+    # Extract helper series / scalars from signals_data
+    extras = signals_data.get("extras", {})
+
+    rsi2 = extras.get("rsi2")
+    cum_vwclv = extras.get("cum_vwclv")
+    vwap_slope = extras.get("vwap_slope")
+    vpin = extras.get("vpin")
+    vwap_lower = extras.get("vwap_lower")
+    vwap_upper = extras.get("vwap_upper")
+    close_vals = extras.get("close")
+
+    # Safe scalar extraction at bar i
+    def _val(series, idx, default=float("nan")):
+        if series is None:
+            return default
+        try:
+            return float(series.iloc[idx])
+        except (IndexError, TypeError):
+            return default
+
+    rsi2_val = _val(rsi2, i)
+    cum_vwclv_val = _val(cum_vwclv, i)
+    vwap_slope_val = _val(vwap_slope, i)
+    vpin_val = _val(vpin, i)
+    close_val = _val(close_vals, i)
+    vwap_lower_val = _val(vwap_lower, i)
+    vwap_upper_val = _val(vwap_upper, i)
+
+    rsi_oversold = params.get("vrp_rsi_oversold", 20)
+    rsi_overbought = params.get("vrp_rsi_overbought", 80)
+    cum_vwclv_threshold = params.get("vrp_cum_vwclv_threshold", 1.0)
+    vpin_threshold = params.get("vrp_vpin_threshold", 0.4)
+
+    import math
+
+    if regime_val in ("R1", "R2"):
+        # Fade logic: counter-trend entry
+        near_lower = (not math.isnan(close_val) and not math.isnan(vwap_lower_val)
+                      and close_val <= vwap_lower_val)
+        near_upper = (not math.isnan(close_val) and not math.isnan(vwap_upper_val)
+                      and close_val >= vwap_upper_val)
+        bullish_div = not math.isnan(cum_vwclv_val) and cum_vwclv_val > 0
+
+        if not math.isnan(rsi2_val) and rsi2_val < rsi_oversold:
+            if bullish_div or near_lower:
+                return "long"
+
+        bearish_div = not math.isnan(cum_vwclv_val) and cum_vwclv_val < 0
+        if not math.isnan(rsi2_val) and rsi2_val > rsi_overbought:
+            if bearish_div or near_upper:
+                return "short"
+
+        return None
+
+    if regime_val == "R3":
+        # Trend-following logic
+        vpin_ok = not math.isnan(vpin_val) and vpin_val < vpin_threshold
+
+        if (not math.isnan(cum_vwclv_val) and cum_vwclv_val > cum_vwclv_threshold
+                and not math.isnan(vwap_slope_val) and vwap_slope_val > 0
+                and vpin_ok):
+            return "long"
+
+        if (not math.isnan(cum_vwclv_val) and cum_vwclv_val < -cum_vwclv_threshold
+                and not math.isnan(vwap_slope_val) and vwap_slope_val < 0
+                and vpin_ok):
+            return "short"
+
+        return None
+
+    return None
+
+
 def run_backtest(df, signals_data, architecture, params):
     """
     Bar-by-bar direction-aware backtest engine with multiple simultaneous exit

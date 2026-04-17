@@ -36,8 +36,10 @@ from apex.util.sector_map import SECTOR_MAP
 from apex.engine.backtest import (
     compute_indicator_signals, compute_regime, compute_entry_score,
     run_backtest, compute_stats, full_backtest,
+    determine_entry_direction, _inject_exec_params,
     DEFAULT_ARCHITECTURE, DEFAULT_PARAMS,
 )
+from apex.engine.fees import borrow_fee, borrow_fee_from_bars, lookup_borrow_rate
 
 # ---- Checkpoints ----
 from apex.util.checkpoints import save_checkpoint, load_checkpoint

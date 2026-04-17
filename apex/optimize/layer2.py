@@ -1,15 +1,20 @@
 """Layer 2: Deep per-symbol parameter optimization."""
 
+import math
+
 import numpy as np
 
 try:
     import optuna
+    from optuna.samplers import NSGAIISampler
 except ImportError:
     optuna = None
+    NSGAIISampler = None
 
 from apex.logging_util import log
 from apex.engine.backtest import full_backtest, DEFAULT_PARAMS
 from apex.optimize.layer1 import _compute_fitness
+from apex.optimize.fitness import compute_regime_fitness
 from apex.util.concept_parser import INDICATOR_REGISTRY
 from apex.util.checkpoints import save_checkpoint
 
@@ -99,6 +104,115 @@ def deep_tune_objective(trial, sym, df_dict, architecture, cfg):
     return fitness
 
 
+def _deep_tune_multi_objective(trial, sym, df_dict, architecture, cfg):
+    """
+    Multi-objective variant: returns (total_return_pct, abs(max_dd_pct)).
+
+    Maximizes return, minimizes drawdown.
+    """
+    sym_data = df_dict[sym]
+    df = sym_data.get("exec_df")
+    daily_df = sym_data.get("daily_df")
+
+    if df is None or len(df) < 100:
+        return -999.0, 999.0
+
+    params = dict(DEFAULT_PARAMS)
+    active_indicators = architecture.get("indicators", [])
+    for ind_name in active_indicators:
+        reg = INDICATOR_REGISTRY.get(ind_name, {})
+        for pname, (lo, hi) in reg.get("params", {}).items():
+            if isinstance(lo, float) or isinstance(hi, float):
+                params[pname] = trial.suggest_float(pname, float(lo), float(hi))
+            else:
+                params[pname] = trial.suggest_int(pname, int(lo), int(hi))
+
+    params["atr_period"] = trial.suggest_int("atr_period", 10, 21)
+    params["atr_stop_mult"] = trial.suggest_float("atr_stop_mult", 0.8, 3.0)
+    params["atr_target_mult"] = trial.suggest_float("atr_target_mult", 1.5, 5.0)
+    params["atr_trail_mult"] = trial.suggest_float("atr_trail_mult", 0.5, 2.5)
+    params["trail_activate_atr"] = trial.suggest_float("trail_activate_atr", 0.3, 2.5)
+    params["max_hold_bars"] = trial.suggest_int("max_hold_bars", 10, 60)
+    params["regime_bonus"] = trial.suggest_int("regime_bonus", 0, 3)
+    params["commission_pct"] = trial.suggest_float("commission_pct", 0.03, 0.10)
+    params["min_score"] = trial.suggest_int("min_score_tune", 2, max(2, len(active_indicators)))
+    architecture = dict(architecture)
+    architecture["min_score"] = params["min_score"]
+
+    split_idx = int(len(df) * 0.7)
+    df_is = df.iloc[:split_idx].reset_index(drop=True)
+    df_oos = df.iloc[split_idx:].reset_index(drop=True)
+
+    if daily_df is not None and len(daily_df) > 0:
+        split_date = df["datetime"].iloc[split_idx]
+        daily_is = daily_df[daily_df["datetime"] <= split_date].reset_index(drop=True)
+        daily_oos = daily_df[daily_df["datetime"] > split_date].reset_index(drop=True)
+        if len(daily_oos) < 20:
+            daily_oos = daily_df.copy()
+    else:
+        daily_is = daily_df
+        daily_oos = daily_df
+
+    if len(df_is) < 80 or len(df_oos) < 30:
+        return -999.0, 999.0
+
+    _, stats_oos = full_backtest(df_oos, daily_oos, architecture, params)
+
+    if stats_oos.get("trades", 0) < 3:
+        return -999.0, 999.0
+
+    total_return = stats_oos.get("total_return_pct", 0.0)
+    max_dd = abs(stats_oos.get("max_dd_pct", 100.0))
+
+    return total_return, max_dd
+
+
+def _select_from_pareto(study, sym, df_dict, architecture, cfg):
+    """
+    Select best trial from Pareto front.
+
+    Filter by max_dd_cap_pct, then rank by compute_regime_fitness.
+    Returns (best_params, fitness_value) or (None, None).
+    """
+    fitness_cfg = cfg.get("fitness", {})
+    max_dd_cap = fitness_cfg.get("max_dd_cap_pct", 8.0)
+    regime_state = cfg.get("regime_state", "")
+
+    best_trials = study.best_trials
+    if not best_trials:
+        return None, None
+
+    # Filter by dd cap: trial.values = (return, dd)
+    candidates = [t for t in best_trials if t.values[1] <= max_dd_cap]
+    if not candidates:
+        # Fallback: take all Pareto-front trials
+        candidates = best_trials
+
+    best_trial = None
+    best_fitness = -999.0
+
+    for trial in candidates:
+        params = dict(DEFAULT_PARAMS)
+        params.update(trial.params)
+
+        sym_data = df_dict[sym]
+        df = sym_data.get("exec_df")
+        daily_df = sym_data.get("daily_df")
+        _, stats = full_backtest(df, daily_df, architecture, params)
+
+        fitness = compute_regime_fitness(regime_state, stats)
+        if fitness > best_fitness:
+            best_fitness = fitness
+            best_trial = trial
+
+    if best_trial is None:
+        return None, None
+
+    best_params = dict(DEFAULT_PARAMS)
+    best_params.update(best_trial.params)
+    return best_params, best_fitness
+
+
 def layer2_deep_tune(data_dict, architecture, survivors, cfg, basket=None):
     """
     Layer 2: per-symbol deep parameter optimization.
@@ -111,7 +225,9 @@ def layer2_deep_tune(data_dict, architecture, survivors, cfg, basket=None):
     the trade's entry date.
     """
     deep_trials = cfg.get("optimization", {}).get("deep_trials", 100)
-    log(f"=== LAYER 2: Deep Parameter Optimization ({deep_trials} trials/symbol) ===")
+    use_multi_obj = cfg.get("fitness", {}).get("use_multi_objective", False)
+    mode_str = "Multi-Objective NSGA-II" if use_multi_obj else "Single-Objective TPE"
+    log(f"=== LAYER 2: Deep Parameter Optimization ({deep_trials} trials/symbol, {mode_str}) ===")
 
     # Cross-asset basket config
     basket_cfg = cfg.get("cross_asset_basket", {})
@@ -131,20 +247,42 @@ def layer2_deep_tune(data_dict, architecture, survivors, cfg, basket=None):
             continue
 
         log(f"  [{idx}/{len(survivors)}] Tuning {sym}...")
-        study = optuna.create_study(direction="maximize",
-                                    sampler=optuna.samplers.TPESampler(seed=42))
 
-        def objective(trial, _sym=sym):
-            return deep_tune_objective(trial, _sym, data_dict, architecture, cfg)
+        if use_multi_obj:
+            # Multi-objective: maximize return, minimize drawdown
+            study = optuna.create_study(
+                directions=["maximize", "minimize"],
+                sampler=NSGAIISampler(seed=42),
+            )
 
-        study.optimize(objective, n_trials=deep_trials, show_progress_bar=False)
+            def objective(trial, _sym=sym):
+                return _deep_tune_multi_objective(trial, _sym, data_dict, architecture, cfg)
 
-        if study.best_trial is None or study.best_value <= -999:
-            log(f"    {sym}: no valid solution found", "WARN")
-            continue
+            study.optimize(objective, n_trials=deep_trials, show_progress_bar=False)
 
-        best_params = dict(DEFAULT_PARAMS)
-        best_params.update(study.best_params)
+            best_params, fitness_val = _select_from_pareto(
+                study, sym, data_dict, architecture, cfg
+            )
+            if best_params is None:
+                log(f"    {sym}: no valid Pareto solution found", "WARN")
+                continue
+        else:
+            # Single-objective: legacy TPE
+            study = optuna.create_study(direction="maximize",
+                                        sampler=optuna.samplers.TPESampler(seed=42))
+
+            def objective(trial, _sym=sym):
+                return deep_tune_objective(trial, _sym, data_dict, architecture, cfg)
+
+            study.optimize(objective, n_trials=deep_trials, show_progress_bar=False)
+
+            if study.best_trial is None or study.best_value <= -999:
+                log(f"    {sym}: no valid solution found", "WARN")
+                continue
+
+            best_params = dict(DEFAULT_PARAMS)
+            best_params.update(study.best_params)
+            fitness_val = study.best_value
 
         sym_data = data_dict[sym]
         df = sym_data.get("exec_df")
@@ -176,10 +314,10 @@ def layer2_deep_tune(data_dict, architecture, survivors, cfg, basket=None):
             "stats": stats,
             "trade_pnls": trade_pnls,
             "trades": trades,
-            "fitness": study.best_value,
+            "fitness": fitness_val,
         }
         log(f"    {sym}: PF={stats['pf']:.2f}, WR={stats['wr_pct']:.1f}%, "
-            f"trades={stats['trades']}, fitness={study.best_value:.4f}")
+            f"trades={stats['trades']}, fitness={fitness_val:.4f}")
 
     save_checkpoint("layer2_tuned", {sym: {k: v for k, v in r.items() if k != "trades"}
                                      for sym, r in results.items()})

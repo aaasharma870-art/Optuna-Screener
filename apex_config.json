@@ -78,6 +78,13 @@
         "size_multiplier": 1.25
     },
 
+    "validation": {
+        "synthetic_mc": {"enabled": false, "n_paths": 1000, "block_size": 5, "min_profitable_pct": 20},
+        "cpcv": {"enabled": false, "n_blocks": 8, "n_test_blocks": 2, "purge_bars": 10},
+        "dsr": {"enabled": false},
+        "pbo": {"enabled": false}
+    },
+
     "amibroker": {
         "database_path": "C:\\AmiBroker\\Data",
         "formulas_path": "C:\\Program Files\\AmiBroker\\Formulas\\Custom"

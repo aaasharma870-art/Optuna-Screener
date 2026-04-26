@@ -668,21 +668,44 @@ def run_backtest(df, signals_data, architecture, params):
     # Build per-bar entry direction arrays
     entry_long = np.zeros(n, dtype=bool)
     entry_short = np.zeros(n, dtype=bool)
+    # Default size multiplier of 1.0 (legacy path is unaffected).
+    size_mults = np.ones(n, dtype=float)
 
-    base_ok = np.array(
-        [(regime_vals[i] != "R4" and
-          not np.isnan(atr_vals[i]) and atr_vals[i] > 0)
-         for i in range(n)],
-        dtype=bool,
-    )
+    regime_model = architecture.get("regime_model", "ema")
 
-    if direction == "long":
-        entry_long = base_ok & (score_vals >= min_score)
-    elif direction == "short":
-        entry_short = base_ok & (score_vals >= min_score)
-    elif direction == "neutral":
-        entry_long = base_ok & (score_vals >= min_score)
-        entry_short = base_ok & (score_vals <= -min_score)
+    if regime_model == "vrp":
+        # VRP regime-gated entry path: delegate the per-bar long/short/None
+        # decision (and position-size scaling) to determine_entry_direction.
+        for i in range(n):
+            if np.isnan(atr_vals[i]) or atr_vals[i] <= 0:
+                continue
+            regime_val = regime_vals[i] if i < len(regime_vals) else None
+            score_val = score_vals[i] if i < len(score_vals) else 0
+            d, sm = determine_entry_direction(
+                regime_val, score_val, signals_data, i, params,
+            )
+            if d == "long":
+                entry_long[i] = True
+                size_mults[i] = sm
+            elif d == "short":
+                entry_short[i] = True
+                size_mults[i] = sm
+    else:
+        # Legacy score-based gating (UNCHANGED).
+        base_ok = np.array(
+            [(regime_vals[i] != "R4" and
+              not np.isnan(atr_vals[i]) and atr_vals[i] > 0)
+             for i in range(n)],
+            dtype=bool,
+        )
+
+        if direction == "long":
+            entry_long = base_ok & (score_vals >= min_score)
+        elif direction == "short":
+            entry_short = base_ok & (score_vals >= min_score)
+        elif direction == "neutral":
+            entry_long = base_ok & (score_vals >= min_score)
+            entry_short = base_ok & (score_vals <= -min_score)
 
     use_fixed_target = "fixed_target" in exit_methods
     use_fixed_stop = "fixed_stop" in exit_methods or "trailing_stop" in exit_methods
@@ -694,6 +717,7 @@ def run_backtest(df, signals_data, architecture, params):
     in_pos = False
     entry_price = 0.0
     entry_atr = 0.0
+    entry_size_mult = 1.0
     stop_price = 0.0
     target_price = 0.0
     trail_active = False
@@ -722,6 +746,7 @@ def run_backtest(df, signals_data, architecture, params):
                 trade_dir = chosen_dir
                 entry_price = open_[i]
                 entry_atr = atr_vals[i - 1]
+                entry_size_mult = float(size_mults[i - 1])
 
                 if trade_dir == "long":
                     stop_price = entry_price - atr_stop_mult * entry_atr
@@ -879,6 +904,12 @@ def run_backtest(df, signals_data, architecture, params):
 
                 net_pnl_pct = pnl_pct - 2.0 * commission_pct
 
+                # VRP regime-scaled position sizing: scale realized P&L by the
+                # size multiplier captured at entry. Legacy path uses 1.0 so
+                # the math is unchanged for non-VRP runs.
+                pnl_pct = pnl_pct * entry_size_mult
+                net_pnl_pct = net_pnl_pct * entry_size_mult
+
                 trades.append({
                     "entry_datetime": str(entry_dt),
                     "exit_datetime": str(dt[i]),
@@ -896,6 +927,7 @@ def run_backtest(df, signals_data, architecture, params):
                     "entry_atr": round(entry_atr, 4),
                     "entry_score": int(score_vals[entry_idx]),
                     "direction": trade_dir,
+                    "size_mult": round(entry_size_mult, 4),
                 })
                 in_pos = False
 

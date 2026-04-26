@@ -45,6 +45,74 @@ def prepare_ensemble_data(data_dict: Dict[str, Dict[str, Any]],
     """
     cache_dir = Path(cfg.get("cache_dir", "apex_cache"))
 
+    # ---- (0) VIX / VXV / VRP percentile (always-on for ensemble) ------------
+    try:
+        from apex.data.fred_client import fetch_fred_series, IV_MAP
+        from apex.regime.vrp import compute_vrp
+
+        # Determine FRED window from the data
+        all_dates_v: List[pd.Timestamp] = []
+        for sd in data_dict.values():
+            for key in ("exec_df", "exec_df_holdout"):
+                edf = sd.get(key)
+                if edf is not None and len(edf) > 0 and "datetime" in edf.columns:
+                    all_dates_v.extend(pd.to_datetime(edf["datetime"]).tolist())
+        if all_dates_v:
+            min_v = min(all_dates_v)
+            max_v = max(all_dates_v)
+            fred_start_v = (min_v - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+            fred_end_v = (max_v + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+            try:
+                vix_df0 = fetch_fred_series("VIXCLS", fred_start_v, fred_end_v)
+            except Exception as e:
+                log(f"  VIX FRED fetch (vrp prep) failed: {e}", "WARN")
+                vix_df0 = pd.DataFrame(columns=["value"])
+            try:
+                vxv_df0 = fetch_fred_series("VXVCLS", fred_start_v, fred_end_v)
+            except Exception as e:
+                log(f"  VXV FRED fetch (vrp prep) failed: {e}", "WARN")
+                vxv_df0 = pd.DataFrame(columns=["value"])
+
+            if (not vix_df0.empty) and (not vxv_df0.empty):
+                for sym, sd in data_dict.items():
+                    iv_id = IV_MAP.get(sym, "VIXCLS")
+                    if iv_id == "VIXCLS":
+                        iv_df0 = vix_df0
+                    else:
+                        try:
+                            iv_df0 = fetch_fred_series(iv_id, fred_start_v, fred_end_v)
+                        except Exception:
+                            iv_df0 = vix_df0
+                    for key in ("exec_df", "exec_df_holdout"):
+                        edf = sd.get(key)
+                        if edf is None or len(edf) == 0 or "datetime" not in edf.columns:
+                            continue
+                        bar_dates = pd.to_datetime(edf["datetime"]).dt.normalize()
+                        edf["vix"] = vix_df0["value"].reindex(
+                            bar_dates.values, method="ffill").values
+                        edf["vxv"] = vxv_df0["value"].reindex(
+                            bar_dates.values, method="ffill").values
+                        # Compute VRP percentile from this symbol's daily close
+                        try:
+                            edf_unique_dates = bar_dates.drop_duplicates().sort_values()
+                            close_daily = edf.groupby(bar_dates)["close"].last()
+                            close_daily.index = pd.DatetimeIndex(close_daily.index)
+                            iv_aligned = iv_df0["value"].reindex(
+                                close_daily.index, method="ffill")
+                            vrp_res = compute_vrp(iv_aligned, close_daily,
+                                                   rv_window=20, pct_window=252)
+                            edf["vrp_pct"] = vrp_res["vrp_pct"].reindex(
+                                bar_dates.values, method="ffill").values
+                        except Exception as e:
+                            log(f"  {sym}: vrp_pct merge failed: {e}", "WARN")
+                            edf["vrp_pct"] = float("nan")
+                        sd[key] = edf
+                log("VIX/VXV/VRP merged onto exec dataframes")
+            else:
+                log("VIX/VXV/VRP merge skipped (FRED unavailable)", "WARN")
+    except Exception as e:
+        log(f"VIX/VXV/VRP merge failed: {e}", "WARN")
+
     # ---- (1) GEX dealer levels (opt-in) -------------------------------------
     options_gex_enabled = cfg.get("options_gex", {}).get("enabled", False)
     if options_gex_enabled:

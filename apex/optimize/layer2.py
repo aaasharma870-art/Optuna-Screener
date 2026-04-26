@@ -57,6 +57,19 @@ def deep_tune_objective(trial, sym, df_dict, architecture, cfg):
     # Phase 9: ensure symbol is in params so VRP short-whitelist gate works.
     params["symbol"] = sym
 
+    # Phase 10: tune VRP entry-logic thresholds + categorical exit choices.
+    # Only suggested when running in vrp regime mode; otherwise legacy defaults
+    # are unchanged.
+    if architecture.get("regime_model") == "vrp":
+        params["vrp_rsi_oversold"] = trial.suggest_int("vrp_rsi_oversold", 5, 30)
+        params["vrp_rsi_overbought"] = trial.suggest_int("vrp_rsi_overbought", 70, 95)
+        params["vrp_cum_vwclv_threshold"] = trial.suggest_float("vrp_cum_vwclv_threshold", 0.5, 2.5)
+        params["vrp_vpin_low_pct"] = trial.suggest_int("vrp_vpin_low_pct", 30, 60)
+        params["vrp_vpin_high_pct"] = trial.suggest_int("vrp_vpin_high_pct", 50, 85)
+        params["vrp_vwap_slope_atr_thresh"] = trial.suggest_float("vrp_vwap_slope_atr_thresh", 0.05, 0.5)
+        params["target_type"] = trial.suggest_categorical("target_type", ["fixed_pct", "vwap"])
+        params["dynamic_stop"] = trial.suggest_categorical("dynamic_stop", [True, False])
+
     # Walk-forward split: 70% IS, 30% OOS
     split_idx = int(len(df) * 0.7)
     df_is = df.iloc[:split_idx].reset_index(drop=True)
@@ -142,6 +155,17 @@ def _deep_tune_multi_objective(trial, sym, df_dict, architecture, cfg):
     architecture["min_score"] = params["min_score"]
     # Phase 9: ensure symbol is in params so VRP short-whitelist gate works.
     params["symbol"] = sym
+
+    # Phase 10: tune VRP thresholds (same set as single-obj objective).
+    if architecture.get("regime_model") == "vrp":
+        params["vrp_rsi_oversold"] = trial.suggest_int("vrp_rsi_oversold", 5, 30)
+        params["vrp_rsi_overbought"] = trial.suggest_int("vrp_rsi_overbought", 70, 95)
+        params["vrp_cum_vwclv_threshold"] = trial.suggest_float("vrp_cum_vwclv_threshold", 0.5, 2.5)
+        params["vrp_vpin_low_pct"] = trial.suggest_int("vrp_vpin_low_pct", 30, 60)
+        params["vrp_vpin_high_pct"] = trial.suggest_int("vrp_vpin_high_pct", 50, 85)
+        params["vrp_vwap_slope_atr_thresh"] = trial.suggest_float("vrp_vwap_slope_atr_thresh", 0.05, 0.5)
+        params["target_type"] = trial.suggest_categorical("target_type", ["fixed_pct", "vwap"])
+        params["dynamic_stop"] = trial.suggest_categorical("dynamic_stop", [True, False])
 
     split_idx = int(len(df) * 0.7)
     df_is = df.iloc[:split_idx].reset_index(drop=True)

@@ -80,7 +80,7 @@
     },
 
     "fitness": {
-        "use_multi_objective": false,
+        "use_multi_objective": true,
         "max_dd_cap_pct": 8.0
     },
 
@@ -94,9 +94,9 @@
     },
 
     "validation": {
-        "synthetic_mc": {"enabled": false, "n_paths": 1000, "block_size": 5, "min_profitable_pct": 20},
-        "cpcv": {"enabled": false, "n_blocks": 8, "n_test_blocks": 2, "purge_bars": 10},
-        "dsr": {"enabled": false},
+        "synthetic_mc": {"enabled": true, "n_paths": 1000, "block_size": 5, "min_profitable_pct": 20},
+        "cpcv": {"enabled": true, "n_blocks": 8, "n_test_blocks": 2, "purge_bars": 10},
+        "dsr": {"enabled": true},
         "pbo": {"enabled": false}
     },
 

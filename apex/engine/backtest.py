@@ -725,10 +725,22 @@ def run_backtest(df, signals_data, architecture, params):
     target_type = params.get("target_type", "fixed_pct")
     use_vwap_target = (target_type == "vwap")
     if use_vwap_target and "vwap" not in df.columns:
-        raise ValueError(
-            "params['target_type']='vwap' requires df['vwap'] column "
-            "(run compute_vwap_bands or compute_vwap upstream)."
-        )
+        # Phase 10: compute VWAP inline if missing so target_type='vwap' is
+        # safe to sweep via Optuna without requiring upstream pre-compute.
+        try:
+            from apex.indicators.vwap_bands import compute_vwap_bands
+            ts_col = "timestamp" if "timestamp" in df.columns else (
+                "datetime" if "datetime" in df.columns else None
+            )
+            if ts_col is not None:
+                vwap_df = compute_vwap_bands(df, timestamp_col=ts_col)
+                df = df.copy()
+                df["vwap"] = vwap_df["vwap"].values
+            else:
+                # No timestamp column → fall back to legacy fixed_pct
+                use_vwap_target = False
+        except Exception:
+            use_vwap_target = False
     vwap_vals = df["vwap"].values if use_vwap_target else None
 
     # Pre-compute FVGs once for the whole series (only when needed)

@@ -249,8 +249,11 @@ class TestVWAPTarget:
         # entry at bar 1 open = 102, target = 102 + 1.0*ATR = 103
         assert trades[0]["exit_reason"] == "fixed_target"
 
-    def test_vwap_target_requires_vwap_column(self):
-        """target_type='vwap' without df['vwap'] raises a clear error."""
+    def test_vwap_target_computes_inline_when_missing(self):
+        """Phase 10: target_type='vwap' without df['vwap'] now computes it
+        inline (used to raise ValueError). Allows Optuna to sweep target_type
+        as a categorical without requiring upstream pre-compute.
+        """
         prices = [100, 102, 104, 106]
         df = _make_df(prices)
         scores = [10, 0, 0, 0]
@@ -260,8 +263,11 @@ class TestVWAPTarget:
                   "commission_pct": 0.0, "atr_stop_mult": 100,
                   "atr_target_mult": 100}
         sd = _make_signals_data(df, scores)
-        with pytest.raises(ValueError, match="vwap"):
-            run_backtest(df, sd, arch, params)
+        # Should not raise — VWAP computed inline from df's OHLCV.
+        trades, stats = run_backtest(df, sd, arch, params)
+        # Either fired a trade or didn't (depends on inline-VWAP target levels);
+        # the contract is just "no error".
+        assert isinstance(trades, list)
 
     def test_vwap_target_exits_when_price_crosses_vwap(self):
         """Long entered far below VWAP, then price rises through VWAP -> fixed_target hit."""

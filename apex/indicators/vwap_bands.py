@@ -80,3 +80,40 @@ def compute_vwap_bands(
     result["vwap_slope_atr"] = result["vwap_slope"] / atr_safe
 
     return result
+
+
+def compute_deviation_zone(
+    df: pd.DataFrame,
+    deviation_sigma: float = 1.5,
+    pullback_sigma: float = 0.5,
+) -> pd.DataFrame:
+    """Adds three boolean columns to df:
+      - in_deviation_zone_long:  close < vwap - deviation_sigma*sigma (fade-long zone)
+      - in_deviation_zone_short: close > vwap + deviation_sigma*sigma (fade-short zone)
+      - in_pullback_zone:        |close - vwap| <= pullback_sigma * sigma (trend pullback)
+
+    Caller must have already run compute_vwap_bands first; this function uses
+    the existing band columns to recover sigma:
+        sigma = vwap_1s_upper - vwap
+    Then arbitrary N-sigma bands are vwap +/- N*sigma. With deviation_sigma=1.5
+    we interpolate between the existing 1- and 2-sigma bands.
+    """
+    if "vwap" not in df.columns or "vwap_1s_upper" not in df.columns:
+        raise ValueError(
+            "compute_deviation_zone requires compute_vwap_bands columns "
+            "(vwap, vwap_1s_upper) to be present."
+        )
+
+    result = df.copy()
+    vwap = result["vwap"]
+    sigma = result["vwap_1s_upper"] - vwap
+
+    dev_upper = vwap + deviation_sigma * sigma
+    dev_lower = vwap - deviation_sigma * sigma
+
+    close = result["close"]
+    result["in_deviation_zone_long"] = close < dev_lower
+    result["in_deviation_zone_short"] = close > dev_upper
+    result["in_pullback_zone"] = (close - vwap).abs() <= (pullback_sigma * sigma)
+
+    return result

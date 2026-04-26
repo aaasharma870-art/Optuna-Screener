@@ -54,6 +54,8 @@ def deep_tune_objective(trial, sym, df_dict, architecture, cfg):
     params["min_score"] = trial.suggest_int("min_score_tune", 2, max(2, len(active_indicators)))
     architecture = dict(architecture)
     architecture["min_score"] = params["min_score"]
+    # Phase 9: ensure symbol is in params so VRP short-whitelist gate works.
+    params["symbol"] = sym
 
     # Walk-forward split: 70% IS, 30% OOS
     split_idx = int(len(df) * 0.7)
@@ -138,6 +140,8 @@ def _deep_tune_multi_objective(trial, sym, df_dict, architecture, cfg):
     params["min_score"] = trial.suggest_int("min_score_tune", 2, max(2, len(active_indicators)))
     architecture = dict(architecture)
     architecture["min_score"] = params["min_score"]
+    # Phase 9: ensure symbol is in params so VRP short-whitelist gate works.
+    params["symbol"] = sym
 
     split_idx = int(len(df) * 0.7)
     df_is = df.iloc[:split_idx].reset_index(drop=True)
@@ -283,6 +287,10 @@ def layer2_deep_tune(data_dict, architecture, survivors, cfg, basket=None):
             best_params = dict(DEFAULT_PARAMS)
             best_params.update(study.best_params)
             fitness_val = study.best_value
+
+        # Phase 9: ensure symbol is on best_params so VRP short-whitelist gates
+        # work in the post-tune full_backtest and downstream Layer 3 calls.
+        best_params["symbol"] = sym
 
         sym_data = data_dict[sym]
         df = sym_data.get("exec_df")

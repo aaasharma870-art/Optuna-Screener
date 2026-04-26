@@ -113,8 +113,57 @@ def test_r1_requires_breakout_reversal_long():
     assert direction is None, "R1 must require breakout_reversal_long=True"
 
 
-def test_r3_requires_sweep_proxy():
-    """R3 long must require sweep_proxy_long signal."""
+def test_short_whitelist_blocks_non_listed_symbol_regime():
+    """Phase 9: shorts gated by (symbol, regime) whitelist.
+
+    Diagnostics on run #4 showed shorts only have edge on (SPY, R1).
+    Whitelist enforces this — shorts on (QQQ, R1) must be blocked.
+    """
+    from apex.engine.backtest import determine_entry_direction
+    n = 20
+    # All R1 short conditions met
+    sd = _make_signals_data(
+        n,
+        rsi2=pd.Series([90.0] * n),
+        cum_vwclv=pd.Series([-0.5] * n),
+        vpin_pct=pd.Series([30.0] * n),
+        breakout_reversal_short=pd.Series([True] * n),
+    )
+    # Whitelist allows (SPY, R1) only — QQQ R1 short must be blocked
+    params = {"symbol": "QQQ", "vrp_short_whitelist": [["SPY", "R1"]]}
+    direction, _ = determine_entry_direction("R1", 0, sd, 5, params)
+    assert direction is None, "QQQ R1 short blocked by whitelist"
+
+    # SPY R1 short with same conditions should fire
+    params2 = {"symbol": "SPY", "vrp_short_whitelist": [["SPY", "R1"]]}
+    direction2, _ = determine_entry_direction("R1", 0, sd, 5, params2)
+    assert direction2 == "short", "SPY R1 short allowed by whitelist"
+
+
+def test_short_whitelist_empty_allows_all():
+    """Empty/missing whitelist preserves back-compat (allows all shorts)."""
+    from apex.engine.backtest import determine_entry_direction
+    n = 20
+    sd = _make_signals_data(
+        n,
+        rsi2=pd.Series([90.0] * n),
+        cum_vwclv=pd.Series([-0.5] * n),
+        vpin_pct=pd.Series([30.0] * n),
+        breakout_reversal_short=pd.Series([True] * n),
+    )
+    # No whitelist — any symbol/regime can short
+    params = {"symbol": "QQQ"}
+    direction, _ = determine_entry_direction("R1", 0, sd, 5, params)
+    assert direction == "short", "Without whitelist, shorts allowed for any symbol"
+
+
+def test_r3_does_not_require_sweep_proxy():
+    """Phase 9: R3 sweep_proxy is bonus-only (was required in Phase 8).
+
+    The 4-AND from Phase 8 made R3 impossible to satisfy at 1H granularity
+    (zero R3 trades fired in run #4). Phase 9 dropped sweep_proxy from the
+    required gate set so R3 trends can actually trigger.
+    """
     from apex.engine.backtest import determine_entry_direction
     n = 20
     sd = _make_signals_data(
@@ -122,10 +171,10 @@ def test_r3_requires_sweep_proxy():
         cum_vwclv=pd.Series([2.0] * n),
         vwap_slope_atr=pd.Series([0.5] * n),
         vpin_pct=pd.Series([70.0] * n),
-        sweep_proxy_long=pd.Series([False] * n),  # gate blocks
+        sweep_proxy_long=pd.Series([False] * n),  # no longer blocks
     )
     direction, _ = determine_entry_direction("R3", 0, sd, 5, {})
-    assert direction is None, "R3 must require sweep_proxy_long=True"
+    assert direction == "long", "R3 should fire long without sweep_proxy after Phase 9"
 
 
 def test_r3_uses_atr_normalized_slope():

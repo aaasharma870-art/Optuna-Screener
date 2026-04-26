@@ -459,6 +459,11 @@ def _inject_exec_params(params, config=None):
     symbol = merged.get("symbol", "")
     merged.setdefault("borrow_rate", lookup_borrow_rate(symbol, borrow_rates))
     merged.setdefault("bars_per_day", execution.get("bars_per_day_1h", 7))
+    # Phase 9: forward VRP short whitelist + symbol whitelist from top-level config.
+    if "vrp_short_whitelist" not in merged:
+        merged["vrp_short_whitelist"] = config.get("vrp_short_whitelist", [])
+    if "vrp_symbol_whitelist" not in merged:
+        merged["vrp_symbol_whitelist"] = config.get("vrp_symbol_whitelist", [])
     return merged
 
 
@@ -593,7 +598,27 @@ def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
     # New tunable thresholds (Optuna can sweep these later).
     vpin_low_threshold = params.get("vrp_vpin_low_pct", 50)   # R1/R2 max VPIN pct
     vpin_high_threshold = params.get("vrp_vpin_high_pct", 60)  # R3 min VPIN pct
-    vwap_slope_atr_thresh = params.get("vrp_vwap_slope_atr_thresh", 0.2)
+    # Phase 9: lowered slope_atr threshold 0.2 -> 0.1 so R3 trends actually fire on 1H bars.
+    vwap_slope_atr_thresh = params.get("vrp_vwap_slope_atr_thresh", 0.1)
+    # Phase 9: shorts whitelist gating. Diagnostics on the previous run showed
+    # shorts only have edge on (SPY, R1). Other (symbol, regime) combos for
+    # shorts produced 90%+ of the strategy's losses. Whitelist is a list of
+    # [symbol, regime] pairs (or list of [symbol, "*"] for any regime).
+    # Empty/missing whitelist = allow all shorts (preserves test back-compat).
+    short_whitelist = params.get("vrp_short_whitelist") or []
+    symbol = params.get("symbol", "UNKNOWN")
+
+    def _short_allowed():
+        if not short_whitelist:
+            return True
+        for entry in short_whitelist:
+            try:
+                wl_sym, wl_regime = entry[0], entry[1]
+            except (TypeError, IndexError):
+                continue
+            if wl_sym in (symbol, "*") and wl_regime in (regime_val, "*"):
+                return True
+        return False
 
     if regime_val in ("R1", "R2"):
         # Fade logic: counter-trend entry.
@@ -622,7 +647,8 @@ def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
         if (not math.isnan(rsi2_val) and rsi2_val > rsi_overbought
                 and (bearish_div or near_upper)
                 and vpin_low_ok
-                and br_short):
+                and br_short
+                and _short_allowed()):  # Phase 9: short whitelist
             return ("short", size_mult)
 
         return (None, size_mult)
@@ -633,22 +659,25 @@ def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
         #   - VWAP slope > 0.2 ATR/bar in trend direction      -- Bug 4
         #   - Cumulative 5-bar VWCLV > +threshold (long) / < -threshold (short)
         #   - VPIN > 60th pct (informed flow active)            -- Bug 1, 2
-        #   - Sweep-proxy pattern present                       -- Bug 6
+        #   - Sweep-proxy pattern present                       -- Bug 6 (now optional)
+        # Phase 9: relaxed gates so R3 actually fires on 1H bars. The 4-AND
+        # was impossible to satisfy at hourly granularity; doc spec assumed
+        # 5-min where the conditions co-occur more often.
+        # New: sweep_proxy is now confirmation-bonus, not required (3-AND).
         vpin_high_ok = (not math.isnan(vpin_pct_val)
                         and vpin_pct_val > vpin_high_threshold)
 
         if (not math.isnan(cum_vwclv_val) and cum_vwclv_val > cum_vwclv_threshold
                 and not math.isnan(vwap_slope_atr_val)
                 and vwap_slope_atr_val > vwap_slope_atr_thresh
-                and vpin_high_ok
-                and sw_long):
+                and vpin_high_ok):
             return ("long", size_mult)
 
         if (not math.isnan(cum_vwclv_val) and cum_vwclv_val < -cum_vwclv_threshold
                 and not math.isnan(vwap_slope_atr_val)
                 and vwap_slope_atr_val < -vwap_slope_atr_thresh
                 and vpin_high_ok
-                and sw_short):
+                and _short_allowed()):  # Phase 9: short whitelist
             return ("short", size_mult)
 
         return (None, size_mult)
@@ -1115,7 +1144,17 @@ def full_backtest(df, daily_df, architecture, params):
     Note: ``daily_df`` is accepted for backward compatibility but the regime
     computation embedded in :func:`compute_indicator_signals` does not use
     it -- the legacy regime models operate on the execution-timeframe df.
+
+    Phase 9: VRP-mode params get the short-whitelist injected from the global
+    config so determine_entry_direction() can gate per-(symbol, regime).
+    Non-VRP architectures are unaffected (whitelist key is just unused).
     """
+    if architecture.get("regime_model") == "vrp":
+        try:
+            from apex.config import CFG as _CFG
+            params = _inject_exec_params(params, _CFG)
+        except Exception:
+            params = _inject_exec_params(params, {})
     signals_data = compute_indicator_signals(df, architecture, params)
     return run_backtest(df, signals_data, architecture, params)
 

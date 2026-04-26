@@ -158,6 +158,8 @@ def phase_full_backtest(data_dict, architecture, final_results, cfg, tuned_resul
             if params:
                 strategy_adapter.reset_params()
         else:
+            params = dict(params) if params else {}
+            params["symbol"] = sym  # Phase 9: VRP short-whitelist gate needs symbol
             trades, stats = full_backtest(df, daily_df, architecture, params)
 
         survived = sym in survivor_set
@@ -183,8 +185,10 @@ def phase_full_backtest(data_dict, architecture, final_results, cfg, tuned_resul
                 if params:
                     strategy_adapter.reset_params()
             else:
+                holdout_params = dict(params) if params else {}
+                holdout_params["symbol"] = sym  # Phase 9: VRP short-whitelist
                 holdout_trades, holdout_stats = full_backtest(
-                    holdout_df, holdout_daily, architecture, params
+                    holdout_df, holdout_daily, architecture, holdout_params
                 )
             for t in holdout_trades:
                 t["symbol"] = sym

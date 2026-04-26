@@ -6,7 +6,7 @@
     "strategy_mode": "vrp_regime",
     "fred_api_key": "PASTE_YOUR_FRED_KEY_HERE",
 
-    "target_symbols": ["SPY", "QQQ", "GLD"],
+    "target_symbols": ["SPY", "QQQ"],
 
     "regime": {
         "enabled": true,
@@ -68,6 +68,9 @@
         "end_date": "2026-04-26",
         "min_1h_bars": 200
     },
+
+    "vrp_short_whitelist": [["SPY", "R1"]],
+    "vrp_symbol_whitelist": ["SPY", "QQQ"],
 
     "borrow_rates": {"default": 0.02},
     "execution": {

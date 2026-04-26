@@ -649,21 +649,14 @@ def main():
     # ---- VRP Data Merge (opt-in) ----
     if cfg.get("strategy_mode") == "vrp_regime":
         from apex.data.fred_client import fetch_fred_series, IV_MAP
+        from apex.data.polygon_client import polygon_request
         from apex.regime.vrp import compute_vrp
         log("=== VRP REGIME MODE: Fetching FRED implied-vol data ===")
 
-        # Determine date range from data
-        all_dates = []
-        for sym, sd in data_dict.items():
-            if sd["exec_df"] is not None and len(sd["exec_df"]) > 0:
-                all_dates.append(sd["exec_df"]["datetime"].iloc[0])
-                all_dates.append(sd["exec_df"]["datetime"].iloc[-1])
-        if all_dates:
-            fred_start = min(all_dates).strftime("%Y-%m-%d")
-            fred_end = max(all_dates).strftime("%Y-%m-%d")
-        else:
-            fred_start = "2020-01-01"
-            fred_end = "2026-12-31"
+        # Use a WIDE FRED window so the 252-day VRP percentile has full history.
+        # Always go back at least to 2015 — VIX/VXV/VXN/GVZ are stable historical series.
+        fred_start = "2015-01-01"
+        fred_end = datetime.now().strftime("%Y-%m-%d")
 
         # Always fetch VIX and VXV for term structure
         try:
@@ -673,6 +666,35 @@ def main():
             log(f"FRED API key missing, skipping VRP merge: {e}", "WARN")
             vix_df = pd.DataFrame(columns=["value"])
             vxv_df = pd.DataFrame(columns=["value"])
+
+        # Helper: fetch a wide daily history for VRP RV calc, separate from
+        # the backtest's daily_df (which may only have ~220 bars).
+        def _fetch_wide_daily(symbol):
+            cache_dir = Path(cfg.get("cache_dir", "apex_cache"))
+            wide_cache = cache_dir / f"{symbol}_daily_wide.csv"
+            if wide_cache.exists():
+                try:
+                    df = pd.read_csv(wide_cache, parse_dates=["datetime"])
+                    if len(df) >= 800:
+                        return df
+                except Exception:
+                    pass
+            data = polygon_request(
+                f"v2/aggs/ticker/{symbol}/range/1/day/{fred_start}/{fred_end}",
+                {"adjusted": "true", "sort": "asc", "limit": 50000},
+            )
+            if data is None or "results" not in data:
+                return None
+            rows = data.get("results", [])
+            if not rows:
+                return None
+            wdf = pd.DataFrame([
+                {"datetime": pd.to_datetime(r["t"], unit="ms"),
+                 "close": r["c"]}
+                for r in rows
+            ]).sort_values("datetime").reset_index(drop=True)
+            wdf.to_csv(wide_cache, index=False)
+            return wdf
 
         for sym in list(data_dict.keys()):
             sd = data_dict[sym]
@@ -690,12 +712,17 @@ def main():
                 log(f"  {sym}: skipping VRP merge (missing FRED data)", "WARN")
                 continue
 
-            # Build daily close for RV computation from daily_df
-            daily_df = sd.get("daily_df")
-            if daily_df is None or len(daily_df) == 0:
-                continue
+            # Fetch a wide daily history for THIS symbol — needed for the
+            # 252-day VRP percentile rolling window.  Falls back to short
+            # daily_df if wide fetch fails.
+            wide_daily = _fetch_wide_daily(sym)
+            if wide_daily is None or len(wide_daily) < 300:
+                log(f"  {sym}: wide daily fetch failed, falling back to short", "WARN")
+                wide_daily = sd.get("daily_df")
+                if wide_daily is None or len(wide_daily) == 0:
+                    continue
 
-            daily_close = daily_df.set_index("datetime")["close"]
+            daily_close = wide_daily.set_index("datetime")["close"]
             iv_aligned = iv_df["value"].reindex(daily_close.index, method="ffill")
 
             vrp_result = compute_vrp(iv_aligned, daily_close, rv_window=20, pct_window=252)
@@ -711,7 +738,9 @@ def main():
                 edf["vxv"] = vxv_df["value"].reindex(bar_dates.values, method="ffill").values
                 edf["vrp_pct"] = vrp_result["vrp_pct"].reindex(bar_dates.values, method="ffill").values
 
-            log(f"  {sym}: VRP columns merged (IV={iv_series_id})")
+            non_nan_vrp = pd.Series(edf["vrp_pct"]).notna().sum() if edf is not None else 0
+            log(f"  {sym}: VRP columns merged (IV={iv_series_id}, "
+                f"daily_hist={len(wide_daily)}, vrp_pct non-NaN={non_nan_vrp})")
 
     # ---- Layer 1 ----
     if cfg.get("strategy_mode") == "vrp_regime":

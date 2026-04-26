@@ -358,12 +358,14 @@ def compute_regime(df, daily_df, regime_model, params):
         # we fall back to all-NaN inputs, which compute_vrp_regime maps to
         # R4 (no trade) -- the backtest then produces zero trades.
         nan_series = pd.Series(np.nan, index=df.index)
-        if "vix" not in df.columns or "vxv" not in df.columns or "vrp_pct" not in df.columns:
-            missing = [c for c in ("vix", "vxv", "vrp_pct") if c not in df.columns]
+        missing = [c for c in ("vix", "vxv", "vrp_pct") if c not in df.columns]
+        if missing and not getattr(_logger, "_vrp_missing_warned", False):
             _logger.warning(
-                "compute_regime(vrp): missing columns %s -- treating all bars as R4.",
+                "compute_regime(vrp): missing columns %s -- treating all bars as R4. "
+                "(suppressing further warnings this session)",
                 missing,
             )
+            _logger._vrp_missing_warned = True
         vix_s = df["vix"] if "vix" in df.columns else nan_series
         vxv_s = df["vxv"] if "vxv" in df.columns else nan_series
         vrp_s = df["vrp_pct"] if "vrp_pct" in df.columns else nan_series

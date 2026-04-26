@@ -103,5 +103,18 @@
     "amibroker": {
         "database_path": "C:\\AmiBroker\\Data",
         "formulas_path": "C:\\Program Files\\AmiBroker\\Formulas\\Custom"
+    },
+
+    "ensemble": {
+        "enabled": false,
+        "strategies": ["vrp_gex_fade", "opex_gravity", "vix_term_structure",
+                       "vol_skew_arb", "smc_structural", "cross_asset_vol_overlay"],
+        "max_weight": 0.30,
+        "vol_lookback_days": 60,
+        "size_change_threshold": 0.10
+    },
+
+    "options_gex": {
+        "enabled": false
     }
 }

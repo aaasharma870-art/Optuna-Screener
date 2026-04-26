@@ -343,6 +343,8 @@ def main():
                         help="Run VRP strategy validation smoke test and exit")
     parser.add_argument("--strategy", type=str, default="",
                         help="Path to a user strategy .py file (uses exact entry/exit logic)")
+    parser.add_argument("--ensemble", action="store_true",
+                        help="Run multi-strategy ensemble pipeline (Phase 12 institutional ensemble)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -437,6 +439,12 @@ def main():
         log("No symbols have sufficient data. Exiting.", "ERROR")
         sys.exit(1)
     survivors = list(data_dict.keys())
+
+    # ---- ENSEMBLE MODE (Phase 12H/12I) ----
+    if args.ensemble:
+        from apex.main_ensemble import run_ensemble_pipeline
+        return run_ensemble_pipeline(data_dict, cfg, run_info, run_output,
+                                     no_amibroker=args.no_amibroker)
 
     # ---- STRATEGY MODE ----
     if args.strategy:

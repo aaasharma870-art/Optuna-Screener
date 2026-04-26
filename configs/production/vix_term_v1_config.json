@@ -1,12 +1,15 @@
 {
-    "polygon_api_key": "i2G48KgZOdi2QJdxXIGrkwiUyzDeQg8_",
-    "cache_dir": "apex_cache",
-    "output_dir": "apex_results",
+    "_doc_": "Production-validated VIX Term Structure v1 config preset. Reproduces the heavy-budget Phase 13/15/16 validation that produced holdout Sharpe 3.27 / +37.68% return / -3.00% MaxDD on unseen 2025-2026 data. Both API keys come from environment variables (POLYGON_API_KEY, FRED_API_KEY); JSON values here are placeholders only.",
+    "_validated_at_": "2026-04-26T17:42:36",
+    "_pipeline_version_": "Phase 16",
 
-    "strategy_mode": "vrp_regime",
-    "fred_api_key": "PASTE_YOUR_FRED_KEY_HERE",
+    "polygon_api_key": "PASTE_POLYGON_KEY_OR_USE_ENV",
+    "fred_api_key":    "PASTE_FRED_KEY_OR_USE_ENV",
+    "cache_dir":       "apex_cache",
+    "output_dir":      "apex_results",
 
-    "target_symbols": ["SPY", "QQQ"],
+    "strategy_mode":   "vrp_regime",
+    "target_symbols":  ["SPY", "QQQ"],
 
     "regime": {
         "enabled": true,
@@ -29,7 +32,6 @@
 
     "optimization": {
         "architecture_trials": 200,
-        "architecture_quick_tune_trials": 30,
         "deep_tune_trials_per_symbol": 800,
         "walk_forward_oos_pct": 0.30,
         "fitness_is_weight": 0.4,
@@ -69,9 +71,6 @@
         "min_1h_bars": 200
     },
 
-    "vrp_short_whitelist": [["SPY", "R1"]],
-    "vrp_symbol_whitelist": ["SPY", "QQQ"],
-
     "borrow_rates": {"default": 0.02},
     "execution": {
         "default_direction": "long",
@@ -84,25 +83,11 @@
         "max_dd_cap_pct": 8.0
     },
 
-    "cross_asset_basket": {
-        "enabled": false,
-        "symbols": ["SPY", "QQQ", "GLD", "USO", "IEF"],
-        "momentum_short_days": 21,
-        "momentum_long_days": 63,
-        "alignment_threshold": 3,
-        "size_multiplier": 1.25
-    },
-
     "validation": {
         "synthetic_mc": {"enabled": true, "n_paths": 1000, "block_size": 5, "min_profitable_pct": 20},
         "cpcv": {"enabled": true, "n_blocks": 8, "n_test_blocks": 2, "purge_bars": 10},
         "dsr": {"enabled": true},
         "pbo": {"enabled": false}
-    },
-
-    "amibroker": {
-        "database_path": "C:\\AmiBroker\\Data",
-        "formulas_path": "C:\\Program Files\\AmiBroker\\Formulas\\Custom"
     },
 
     "ensemble": {

@@ -1,10 +1,10 @@
 {
-    "polygon_api_key": "i2G48KgZOdi2QJdxXIGrkwiUyzDeQg8_",
+    "polygon_api_key": "PASTE_POLYGON_KEY_OR_USE_ENV",
     "cache_dir": "apex_cache",
     "output_dir": "apex_results",
 
     "strategy_mode": "vrp_regime",
-    "fred_api_key": "PASTE_YOUR_FRED_KEY_HERE",
+    "fred_api_key": "PASTE_FRED_KEY_OR_USE_ENV",
 
     "target_symbols": ["SPY", "QQQ"],
 
@@ -108,8 +108,9 @@
     "ensemble": {
         "enabled": true,
         "tune_strategies": true,
-        "strategies": ["vix_term_structure", "cross_asset_vol_overlay"],
-        "max_weight": 1.00,
+        "strategies": ["vrp_gex_fade", "opex_gravity", "vix_term_structure",
+                       "vol_skew_arb", "smc_structural", "cross_asset_vol_overlay"],
+        "max_weight": 0.30,
         "vol_lookback_days": 60,
         "size_change_threshold": 0.10
     },

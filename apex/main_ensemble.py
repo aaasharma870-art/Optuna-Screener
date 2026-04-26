@@ -440,6 +440,9 @@ def _resolve_strategy_classes(cfg: Dict[str, Any]) -> List[Any]:
     import apex.strategies.vrp_gex_fade  # noqa: F401
     import apex.strategies.opex_gravity  # noqa: F401
     import apex.strategies.vix_term_structure  # noqa: F401
+    import apex.strategies.ts_exhaustion_fade  # noqa: F401
+    import apex.strategies.vix_liquidity_reclaim  # noqa: F401
+    import apex.strategies.institutional_arbitrage_engine_v2  # noqa: F401
     import apex.strategies.vol_skew_arb  # noqa: F401
     import apex.strategies.smc_structural  # noqa: F401
     import apex.strategies.cross_asset_vol_overlay  # noqa: F401

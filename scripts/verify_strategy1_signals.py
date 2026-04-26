@@ -3,10 +3,6 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import os
-os.environ.setdefault("POLYGON_API_KEY", "i2G48KgZOdi2QJdxXIGrkwiUyzDeQg8_")
-os.environ.setdefault("FRED_API_KEY", "aedfa3c4c33c527fd4b4cbcf4c25f258")
-
 import pandas as pd
 import numpy as np
 

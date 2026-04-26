@@ -679,19 +679,28 @@ def main():
                         return df
                 except Exception:
                     pass
-            data = polygon_request(
-                f"v2/aggs/ticker/{symbol}/range/1/day/{fred_start}/{fred_end}",
-                {"adjusted": "true", "sort": "asc", "limit": 50000},
-            )
-            if data is None or "results" not in data:
-                return None
-            rows = data.get("results", [])
-            if not rows:
+            # Paginate: Polygon caps at 5000 rows/page even with limit=50000
+            all_rows = []
+            next_url = None
+            endpoint = f"v2/aggs/ticker/{symbol}/range/1/day/{fred_start}/{fred_end}"
+            page_params = {"adjusted": "true", "sort": "asc", "limit": 50000}
+            for _ in range(50):
+                if next_url:
+                    data = polygon_request(next_url, {})
+                else:
+                    data = polygon_request(endpoint, page_params)
+                if data is None or "results" not in data or not data["results"]:
+                    break
+                all_rows.extend(data["results"])
+                next_url = data.get("next_url")
+                if not next_url:
+                    break
+            if not all_rows:
                 return None
             wdf = pd.DataFrame([
                 {"datetime": pd.to_datetime(r["t"], unit="ms"),
                  "close": r["c"]}
-                for r in rows
+                for r in all_rows
             ]).sort_values("datetime").reset_index(drop=True)
             wdf.to_csv(wide_cache, index=False)
             return wdf

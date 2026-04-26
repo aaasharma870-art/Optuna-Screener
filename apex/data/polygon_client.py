@@ -80,15 +80,29 @@ def fetch_daily(symbol):
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=int(bars_needed * 1.6))).strftime("%Y-%m-%d")
 
-    data = polygon_request(
-        f"v2/aggs/ticker/{symbol}/range/1/day/{start_date}/{end_date}",
-        {"adjusted": "true", "sort": "asc", "limit": 50000},
-    )
-    if data is None or data.get("status") == "ERROR" or "results" not in data:
-        return symbol, None, "NO_DATA"
+    # Paginate: follow next_url until exhausted
+    all_rows = []
+    next_url = None
+    endpoint = f"v2/aggs/ticker/{symbol}/range/1/day/{start_date}/{end_date}"
+    page_params = {"adjusted": "true", "sort": "asc", "limit": 50000}
 
-    rows = data["results"]
-    if not rows:
+    page = 0
+    while page < 50:
+        if next_url:
+            data = polygon_request(next_url, {})
+        else:
+            data = polygon_request(endpoint, page_params)
+        if data is None or data.get("status") == "ERROR" or "results" not in data:
+            break
+        if not data["results"]:
+            break
+        all_rows.extend(data["results"])
+        next_url = data.get("next_url")
+        if not next_url:
+            break
+        page += 1
+
+    if not all_rows:
         return symbol, None, "NO_DATA"
 
     df = pd.DataFrame([
@@ -100,7 +114,7 @@ def fetch_daily(symbol):
             "close": r["c"],
             "volume": r.get("v", 0),
         }
-        for r in rows
+        for r in all_rows
     ])
     df = df.sort_values("datetime").reset_index(drop=True)
     df.to_csv(cache_file, index=False)
@@ -138,14 +152,31 @@ def fetch_bars(symbol, timeframe="1H", start_date=None, end_date=None):
     if end_date is None:
         end_date = p3.get("end_date", datetime.now().strftime("%Y-%m-%d"))
 
-    data = polygon_request(
-        f"v2/aggs/ticker/{symbol}/range/{mult}/{span}/{start_date}/{end_date}",
-        {"adjusted": "true", "sort": "asc", "limit": 50000},
-    )
-    if data is None or "results" not in data or not data["results"]:
+    # Paginate: follow next_url until exhausted (Polygon Stock Starter caps
+    # at 5000 bars/page even when limit=50000 is requested).
+    all_rows = []
+    next_url = None
+    endpoint = f"v2/aggs/ticker/{symbol}/range/{mult}/{span}/{start_date}/{end_date}"
+    page_params = {"adjusted": "true", "sort": "asc", "limit": 50000}
+
+    page = 0
+    max_pages = 50  # safety cap (5000 bars/page * 50 = 250k bars = ~13 years 1H)
+    while page < max_pages:
+        if next_url:
+            data = polygon_request(next_url, {})
+        else:
+            data = polygon_request(endpoint, page_params)
+        if data is None or "results" not in data or not data["results"]:
+            break
+        all_rows.extend(data["results"])
+        next_url = data.get("next_url")
+        if not next_url:
+            break
+        page += 1
+
+    if not all_rows:
         return symbol, None, "NO_DATA"
 
-    rows = data["results"]
     df = pd.DataFrame([
         {
             "datetime": pd.to_datetime(r["t"], unit="ms"),
@@ -155,7 +186,7 @@ def fetch_bars(symbol, timeframe="1H", start_date=None, end_date=None):
             "close": r["c"],
             "volume": r.get("v", 0),
         }
-        for r in rows
+        for r in all_rows
     ])
     # Keep regular-hours bars only (9:30-16:00 ET approximated as hour 9-16)
     df["hour"] = df["datetime"].dt.hour

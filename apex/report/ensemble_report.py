@@ -20,6 +20,7 @@ _TAB_LABELS = [
     "CPCV Distribution",
     "Walk-Forward Weights",
     "Layer A Results",
+    "PnL Comparison",
 ]
 
 
@@ -77,7 +78,10 @@ def generate_ensemble_report(results: Dict[str, Any], output_dir: str) -> str:
     layer_a_rows: List[Dict[str, Any]] = results.get("layer_a_rows", [])
     layer_a_by_strat: Dict[str, str] = results.get("layer_a_by_strategy", {})
     layer_b: Dict[str, Any] = results.get("layer_b", {}) or {}
+    layer_b_holdout: Dict[str, Any] = results.get("layer_b_holdout", {}) or {}
     layer_c: Dict[str, Any] = results.get("layer_c", {}) or {}
+    pnl_tune: Dict[str, Any] = results.get("pnl_tune", {}) or {}
+    pnl_holdout: Dict[str, Any] = results.get("pnl_holdout", {}) or {}
     ref_close = results.get("ref_close", []) or []
     ref_dt = results.get("ref_dt", []) or []
     portfolio_position = results.get("portfolio_position", []) or []
@@ -273,6 +277,138 @@ def generate_ensemble_report(results: Dict[str, Any], output_dir: str) -> str:
       </table>
     """
 
+    # ---- Tab 8: PnL Comparison (tune vs holdout) ----
+    def _fmt_row(name: str,
+                 tune_d: Dict[str, Any],
+                 hold_d: Dict[str, Any]) -> str:
+        def _g(d, k, fmt):
+            if not d or "error" in d:
+                return "&mdash;"
+            try:
+                v = d.get(k, 0.0)
+                return fmt.format(v)
+            except Exception:
+                return "&mdash;"
+        return (
+            f"<tr><td>{_esc(name)}</td>"
+            f"<td>{_g(tune_d, 'n_trades', '{:d}')}</td>"
+            f"<td>{_g(tune_d, 'win_rate_pct', '{:.1f}')}</td>"
+            f"<td>{_g(tune_d, 'total_return_pct', '{:+.2f}')}</td>"
+            f"<td>{_g(tune_d, 'max_dd_pct', '{:+.2f}')}</td>"
+            f"<td>{_g(tune_d, 'sharpe_annualized', '{:.2f}')}</td>"
+            f"<td>{_g(tune_d, 'calmar', '{:.2f}')}</td>"
+            f"<td class='sep'>{_g(hold_d, 'n_trades', '{:d}')}</td>"
+            f"<td>{_g(hold_d, 'win_rate_pct', '{:.1f}')}</td>"
+            f"<td>{_g(hold_d, 'total_return_pct', '{:+.2f}')}</td>"
+            f"<td>{_g(hold_d, 'max_dd_pct', '{:+.2f}')}</td>"
+            f"<td>{_g(hold_d, 'sharpe_annualized', '{:.2f}')}</td>"
+            f"<td>{_g(hold_d, 'calmar', '{:.2f}')}</td>"
+            f"</tr>\n"
+        )
+
+    pnl_strategy_names = [n for n in pnl_tune.keys() if n != "__portfolio__"]
+    # Order: portfolio first, then strategies
+    pnl_rows_html = ""
+    pnl_rows_html += _fmt_row(
+        "PORTFOLIO (combined)",
+        pnl_tune.get("__portfolio__", {}),
+        pnl_holdout.get("__portfolio__", {}),
+    )
+    for nm in pnl_strategy_names:
+        pnl_rows_html += _fmt_row(
+            nm, pnl_tune.get(nm, {}), pnl_holdout.get(nm, {})
+        )
+
+    # Decay headline
+    port_t = pnl_tune.get("__portfolio__", {}) or {}
+    port_h = pnl_holdout.get("__portfolio__", {}) or {}
+    if (port_t and port_h
+            and "error" not in port_t and "error" not in port_h):
+        try:
+            sharpe_drop = float(port_h.get("sharpe_annualized", 0.0)) - \
+                          float(port_t.get("sharpe_annualized", 0.0))
+            return_drop = float(port_h.get("total_return_pct", 0.0)) - \
+                          float(port_t.get("total_return_pct", 0.0))
+            decay_html = (
+                f"<p><b>Holdout-vs-Tune decay:</b> "
+                f"Sharpe {sharpe_drop:+.2f}, Return {return_drop:+.2f}%</p>"
+            )
+        except Exception:
+            decay_html = ""
+    else:
+        decay_html = "<p><i>Holdout PnL unavailable (insufficient holdout data).</i></p>"
+
+    # Holdout Layer B Sharpe summary
+    hb_med = layer_b_holdout.get("sharpe_median", 0.0) or 0.0
+    hb_iqr = layer_b_holdout.get("sharpe_iqr", [0.0, 0.0]) or [0.0, 0.0]
+    hb_status = layer_b_holdout.get("layer_b_status", "?")
+    if not layer_b_holdout.get("skipped") and "error" not in layer_b_holdout:
+        sharpe_decay_b = float(hb_med) - float(sharpe_med)
+        layer_b_holdout_html = (
+            f"<p><b>Layer B (holdout) CPCV:</b> "
+            f"median Sharpe={hb_med:.2f} IQR=[{hb_iqr[0]:.2f}, {hb_iqr[1]:.2f}] "
+            f"status=<span class='status-{_esc(hb_status.lower())}'>"
+            f"{_esc(hb_status)}</span> | "
+            f"Sharpe gap vs tune: {sharpe_decay_b:+.2f}</p>"
+        )
+    else:
+        layer_b_holdout_html = (
+            "<p><i>Layer B (holdout) CPCV: skipped (insufficient holdout bars).</i></p>"
+        )
+
+    pnl_table_html = f"""
+      {layer_b_holdout_html}
+      {decay_html}
+      <table class="tbl pnl">
+        <thead>
+          <tr>
+            <th rowspan="2">Strategy</th>
+            <th colspan="6" class="sep">TUNE window</th>
+            <th colspan="6" class="sep">HOLDOUT window (TRUE OOS)</th>
+          </tr>
+          <tr>
+            <th>Trades</th><th>WinRate%</th><th>TotalRet%</th>
+            <th>MaxDD%</th><th>Sharpe</th><th>Calmar</th>
+            <th class="sep">Trades</th><th>WinRate%</th><th>TotalRet%</th>
+            <th>MaxDD%</th><th>Sharpe</th><th>Calmar</th>
+          </tr>
+        </thead>
+        <tbody>
+          {pnl_rows_html}
+        </tbody>
+      </table>
+    """
+
+    # Equity curve plot: portfolio tune + holdout, vertical line at split
+    pnl_eq_traces: List[Dict[str, Any]] = []
+    tune_eq = port_t.get("equity_curve", []) if isinstance(port_t, dict) else []
+    hold_eq = port_h.get("equity_curve", []) if isinstance(port_h, dict) else []
+    n_tune = len(tune_eq)
+    n_hold = len(hold_eq)
+    if n_tune > 1:
+        pnl_eq_traces.append({
+            "x": list(range(n_tune)),
+            "y": [round(v, 5) for v in tune_eq],
+            "type": "scatter", "mode": "lines",
+            "name": "Portfolio (tune)",
+            "line": {"color": "#58a6ff", "width": 2},
+        })
+    if n_hold > 1:
+        # Holdout chained from tune end so the curve reads continuously
+        last_tune = tune_eq[-1] if tune_eq else 1.0
+        first_hold = hold_eq[0] if hold_eq else 1.0
+        scale = (last_tune / first_hold) if first_hold else 1.0
+        pnl_eq_traces.append({
+            "x": list(range(n_tune, n_tune + n_hold)),
+            "y": [round(v * scale, 5) for v in hold_eq],
+            "type": "scatter", "mode": "lines",
+            "name": "Portfolio (holdout - TRUE OOS)",
+            "line": {"color": "#f0b400", "width": 2},
+        })
+    pnl_eq_div = "ensemble_pnl_eq_div"
+    pnl_eq_traces_json = json.dumps(pnl_eq_traces)
+    pnl_eq_split = n_tune  # vertical line x-coord
+
     # ---- Build full HTML ----
     tabs_buttons = "\n".join(
         f'<button class="tab-btn" data-tab="tab-{i}">{_esc(lbl)}</button>'
@@ -319,6 +455,8 @@ def generate_ensemble_report(results: Dict[str, Any], output_dir: str) -> str:
     .status-fail {{ color: #d73a49; }}
     .status-error {{ color: #d73a49; }}
     .status-mixed {{ color: #f0b400; }}
+    .tbl.pnl th.sep, .tbl.pnl td.sep {{ border-left: 2px solid #58a6ff; }}
+    .tbl.pnl th {{ text-align: center; }}
   </style>
 </head>
 <body>
@@ -336,6 +474,7 @@ def generate_ensemble_report(results: Dict[str, Any], output_dir: str) -> str:
   <div class="tab-pane" id="tab-4"><div id="{cpcv_div}" style="height:480px;"></div></div>
   <div class="tab-pane" id="tab-5">{wf_summary_html}<div id="{wf_div}" style="height:420px;"></div></div>
   <div class="tab-pane" id="tab-6">{la_html}</div>
+  <div class="tab-pane" id="tab-7">{pnl_table_html}<div id="{pnl_eq_div}" style="height:480px;margin-top:14px;"></div></div>
 
   <script>
     // Tab switching
@@ -361,6 +500,17 @@ def generate_ensemble_report(results: Dict[str, Any], output_dir: str) -> str:
                    Object.assign({{title: "Layer B CPCV OOS Sharpe Distribution"}}, darkLayout));
     Plotly.newPlot("{wf_div}", {wf_traces_json},
                    Object.assign({{title: "Layer C Walk-Forward Weights: Static vs Dynamic"}}, darkLayout));
+    Plotly.newPlot("{pnl_eq_div}", {pnl_eq_traces_json},
+                   Object.assign({{title: "Portfolio Equity: Tune vs Holdout (TRUE OOS)",
+                                   shapes: [{{type: 'line',
+                                              x0: {pnl_eq_split}, x1: {pnl_eq_split},
+                                              y0: 0, y1: 1, yref: 'paper',
+                                              line: {{color: '#d73a49', width: 1.5, dash: 'dash'}}}}],
+                                   annotations: [{{x: {pnl_eq_split}, y: 1, yref: 'paper',
+                                                   showarrow: false,
+                                                   text: 'tune | holdout',
+                                                   font: {{color: '#d73a49'}}}}]}},
+                                 darkLayout));
   </script>
 </body>
 </html>

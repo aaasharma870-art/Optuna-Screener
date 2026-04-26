@@ -269,6 +269,22 @@ def phase3_fetch_data(survivors, daily_data, cfg):
             log(f"    {sym}: SKIP (exec bars: {len(exec_df_full) if exec_df_full is not None else 0})")
             continue
 
+        # Phase 11a: slice cached exec data to the configured phase3 window.
+        # Lets us rotate the holdout chronologically without re-fetching.
+        p3 = cfg.get("phase3_params", {})
+        slice_start = p3.get("start_date")
+        slice_end = p3.get("end_date")
+        if slice_start or slice_end:
+            mask = pd.Series(True, index=exec_df_full.index)
+            if slice_start:
+                mask &= exec_df_full["datetime"] >= pd.Timestamp(slice_start)
+            if slice_end:
+                mask &= exec_df_full["datetime"] <= pd.Timestamp(slice_end)
+            exec_df_full = exec_df_full[mask].reset_index(drop=True)
+            if len(exec_df_full) < 100:
+                log(f"    {sym}: SKIP after slice (bars: {len(exec_df_full)})")
+                continue
+
         daily_df_full = daily_data.get(sym)
 
         # Reserve the final N% as a true holdout that NO optimizer ever sees.

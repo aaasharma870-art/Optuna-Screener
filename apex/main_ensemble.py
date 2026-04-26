@@ -430,8 +430,12 @@ def run_layer_c_validation(per_strategy_returns: Dict[str, pd.Series],
 # Combiner runner                                                             #
 # --------------------------------------------------------------------------- #
 
-def _build_strategies(cfg: Dict[str, Any]) -> List[Any]:
-    """Instantiate the curated ensemble strategies from the registry."""
+def _resolve_strategy_classes(cfg: Dict[str, Any]) -> List[Any]:
+    """Resolve the configured ensemble strategy CLASSES (not instances).
+
+    Triggers registration of all 6 strategies via decorator-on-import, then
+    looks up each name configured under ensemble.strategies in the registry.
+    """
     # Trigger registration of all 6 strategies (decorators register on import)
     import apex.strategies.vrp_gex_fade  # noqa: F401
     import apex.strategies.opex_gravity  # noqa: F401
@@ -444,18 +448,98 @@ def _build_strategies(cfg: Dict[str, Any]) -> List[Any]:
     ens_cfg = cfg.get("ensemble", {})
     names = ens_cfg.get("strategies") or list(STRATEGY_REGISTRY.keys())
 
-    strategies = []
+    classes = []
     for name in names:
         cls = STRATEGY_REGISTRY.get(name)
         if cls is None:
             log(f"  Ensemble: strategy '{name}' not in registry, skipping", "WARN")
             continue
+        classes.append(cls)
+        log(f"  Ensemble: resolved strategy class '{name}'")
+    return classes
+
+
+def _build_strategies(cfg: Dict[str, Any]) -> List[Any]:
+    """Instantiate the curated ensemble strategies from the registry (defaults)."""
+    classes = _resolve_strategy_classes(cfg)
+    strategies = []
+    for cls in classes:
         try:
             strategies.append(cls())
-            log(f"  Ensemble: loaded strategy '{name}'")
         except Exception as e:
-            log(f"  Ensemble: failed to instantiate '{name}': {e}", "WARN")
+            log(f"  Ensemble: failed to instantiate '{cls.name}': {e}", "WARN")
     return strategies
+
+
+# --------------------------------------------------------------------------- #
+# Phase 13: per-strategy Optuna tuning                                        #
+# --------------------------------------------------------------------------- #
+
+# Maps the CLI / config budget label to a per-strategy trial count.
+ENSEMBLE_TUNING_TRIALS_BY_BUDGET: Dict[str, int] = {
+    "light":  25,
+    "medium": 50,
+    "heavy":  150,
+}
+
+
+def _budget_label(cfg: Dict[str, Any]) -> str:
+    """Infer the budget label from the active config's optimization.arch_trials.
+
+    The CLI rewrites optimization.arch_trials from budget_profiles.<budget>
+    before run_ensemble_pipeline is called, so we map back via that count.
+    """
+    bp = cfg.get("budget_profiles", {})
+    arch = int(cfg.get("optimization", {}).get("arch_trials", 0))
+    for label in ("light", "medium", "heavy"):
+        if int(bp.get(label, {}).get("arch_trials", -1)) == arch:
+            return label
+    return "medium"
+
+
+def _tuning_n_trials(cfg: Dict[str, Any]) -> int:
+    """Resolve the number of Optuna trials per strategy from the budget."""
+    label = _budget_label(cfg)
+    return ENSEMBLE_TUNING_TRIALS_BY_BUDGET.get(label, 50)
+
+
+def _tuning_data_per_symbol(data_dict: Dict[str, Dict[str, Any]]
+                              ) -> Dict[str, Dict[str, Any]]:
+    """Build the {symbol: data dict} map that tune_ensemble_strategies expects.
+
+    Each value is a strategy-shaped dict (exec_df_1H + regime_state).
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for sym, sd in data_dict.items():
+        edf = sd.get("exec_df")
+        if edf is None or len(edf) == 0:
+            continue
+        out[sym] = {
+            "exec_df_1H": edf,
+            "regime_state": pd.Series(["R2"] * len(edf)),
+            "symbol": sym,
+        }
+    return out
+
+
+def _serialize_tuning_results(results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """JSON-safe copy of the tuning results dict."""
+    out: Dict[str, Any] = {}
+    for name, r in results.items():
+        out[name] = {}
+        for k, v in r.items():
+            if isinstance(v, dict):
+                out[name][k] = {
+                    kk: (float(vv) if isinstance(vv, (np.floating,)) else vv)
+                    for kk, vv in v.items()
+                }
+            elif isinstance(v, (np.floating,)):
+                out[name][k] = float(v)
+            elif isinstance(v, (np.integer,)):
+                out[name][k] = int(v)
+            else:
+                out[name][k] = v
+    return out
 
 
 def _pick_primary_symbol(data_dict: Dict[str, Dict[str, Any]]) -> Optional[str]:
@@ -503,11 +587,78 @@ def run_ensemble_pipeline(data_dict: Dict[str, Dict[str, Any]],
     log("=== ENSEMBLE: prepare_ensemble_data ===")
     data_dict = prepare_ensemble_data(data_dict, cfg)
 
-    # ---- Phase 12H/1: load strategies ----
-    log("=== ENSEMBLE: loading strategies ===")
-    strategies = _build_strategies(cfg)
-    if not strategies:
+    # ---- Phase 12H/1: resolve strategy classes ----
+    log("=== ENSEMBLE: resolving strategy classes ===")
+    strategy_classes = _resolve_strategy_classes(cfg)
+    if not strategy_classes:
         log("No strategies available -- aborting", "ERROR")
+        return {}
+
+    # ---- Phase 13: per-strategy Optuna tuning (CPCV-scored) ----
+    ens_cfg = cfg.get("ensemble", {})
+    tune_strategies_flag = bool(ens_cfg.get("tune_strategies", True))
+    tuning_results: Dict[str, Dict[str, Any]] = {}
+
+    if tune_strategies_flag:
+        from apex.optimize.ensemble_tuning import tune_ensemble_strategies
+
+        n_trials = _tuning_n_trials(cfg)
+        budget_label = _budget_label(cfg)
+        log(f"=== ENSEMBLE: Phase 13 per-strategy Optuna tuning "
+            f"(budget={budget_label}, {n_trials} trials/strategy) ===")
+        tuning_data = _tuning_data_per_symbol(data_dict)
+        try:
+            tuning_results = tune_ensemble_strategies(
+                strategy_classes, tuning_data,
+                n_trials_per_strategy=n_trials,
+            )
+        except Exception as e:
+            log(f"Phase 13 tuning failed: {e}", "ERROR")
+            traceback.print_exc()
+            tuning_results = {}
+
+        # Persist tuning results
+        try:
+            (run_output / "ensemble_tuning_results.json").write_text(
+                json.dumps(_serialize_tuning_results(tuning_results), indent=2)
+            )
+            log(f"  Tuning results: {run_output / 'ensemble_tuning_results.json'}")
+        except Exception as e:
+            log(f"  Could not write tuning results: {e}", "WARN")
+
+        # Tuning summary printout
+        log("--- Phase 13 tuning summary ---")
+        for cls in strategy_classes:
+            tuned = tuning_results.get(cls.name, {})
+            bp = tuned.get("best_params", {})
+            bs = tuned.get("best_sharpe", float("nan"))
+            if bp:
+                log(f"  {cls.name:30s} best CPCV Sharpe={bs:.3f}")
+                for k, v in bp.items():
+                    if isinstance(v, float):
+                        log(f"      {k:30s} = {v:.4f}")
+                    else:
+                        log(f"      {k:30s} = {v}")
+            else:
+                log(f"  {cls.name:30s} (no tunable params or tuning skipped)")
+    else:
+        log("=== ENSEMBLE: Phase 13 tuning DISABLED "
+            "(ensemble.tune_strategies=false) -- using strategy defaults ===")
+
+    # Instantiate strategies, injecting tuned params when available
+    strategies: List[Any] = []
+    for cls in strategy_classes:
+        tuned = tuning_results.get(cls.name, {})
+        best_params = tuned.get("best_params", {}) or {}
+        try:
+            instance = cls(params=best_params) if best_params else cls()
+            strategies.append(instance)
+            log(f"  Ensemble: loaded strategy '{cls.name}'"
+                f"{' (tuned)' if best_params else ' (defaults)'}")
+        except Exception as e:
+            log(f"  Ensemble: failed to instantiate '{cls.name}': {e}", "WARN")
+    if not strategies:
+        log("No strategies could be instantiated -- aborting", "ERROR")
         return {}
 
     # ---- Layer A: per-strategy CPCV ----

@@ -106,7 +106,8 @@
     },
 
     "ensemble": {
-        "enabled": false,
+        "enabled": true,
+        "tune_strategies": true,
         "strategies": ["vrp_gex_fade", "opex_gravity", "vix_term_structure",
                        "vol_skew_arb", "smc_structural", "cross_asset_vol_overlay"],
         "max_weight": 0.30,
@@ -115,6 +116,7 @@
     },
 
     "options_gex": {
-        "enabled": false
+        "enabled": true,
+        "cache_subdir": "gex"
     }
 }

@@ -299,6 +299,30 @@ def layer3_robustness_gauntlet(data_dict, architecture, tuned_results, cfg, stra
                     robustness_data[sym]["pbo"] = round(pbo_val, 4)
                     log(f"    {sym}: PBO = {pbo_val:.4f}")
 
+        # CPCV evaluation: do best_params produce a consistent positive Sharpe
+        # across every held-out fold, or only on one specific slice?
+        cpcv_cfg = vcfg.get("cpcv", {})
+        if cpcv_cfg.get("enabled", False):
+            from apex.validation.cpcv import evaluate_params_via_cpcv
+            df_cpcv = sym_data.get("exec_df")
+            daily_df_cpcv = sym_data.get("daily_df")
+            cpcv_result = evaluate_params_via_cpcv(
+                symbol=sym,
+                df=df_cpcv,
+                daily_df=daily_df_cpcv,
+                architecture=architecture,
+                best_params=params,
+                n_blocks=cpcv_cfg.get("n_blocks", 8),
+                n_test_blocks=cpcv_cfg.get("n_test_blocks", 2),
+                purge_bars=cpcv_cfg.get("purge_bars", 10),
+            )
+            if cpcv_result.get("n_folds", 0) > 0:
+                log(f"    {sym} CPCV: {cpcv_result['n_folds']} folds, "
+                    f"median Sharpe={cpcv_result['sharpe_median']:.2f} "
+                    f"[{cpcv_result['sharpe_iqr'][0]:.2f}, {cpcv_result['sharpe_iqr'][1]:.2f}], "
+                    f"{cpcv_result['sharpe_pct_positive']*100:.0f}% folds positive")
+            robustness_data[sym]["cpcv"] = cpcv_result
+
         # Use adjusted score if validation penalised it
         composite = robust_score
 

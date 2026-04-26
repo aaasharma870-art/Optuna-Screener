@@ -5,29 +5,59 @@ from a Polygon-style options chain snapshot. The chain fetch is isolated in
 ``_fetch_chain`` so tests can monkeypatch it without touching the network.
 
 Spec: docs/superpowers/specs/2026-04-14-optuna-screener-overhaul-design.md sec 6.2
+Phase 14 wires _fetch_chain to apex.data.polygon_options.build_chain_for_date
+which uses real Polygon historical contract metadata + close prices and
+synthesises greeks via Black-Scholes (Polygon Starter has no historical greeks).
 """
 import json
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
+
 CONTRACT_SIZE = 100  # standard equity option multiplier
 
 
 def _fetch_chain(symbol: str, as_of) -> dict:
-    """Fetch the options chain for ``symbol`` as of ``as_of``.
+    """Fetch a real Polygon options chain snapshot for backtesting.
 
-    The default implementation is a stub that raises so production callers
-    must either:
-      * monkeypatch this function in tests, or
-      * pre-populate a JSON cache on disk and read via ``compute_gex_proxy``.
+    Uses ``apex.data.polygon_options.build_chain_for_date`` which fetches
+    historical option contracts + close prices and computes synthetic
+    greeks via Black-Scholes. Greeks are synthetic (see polygon_options
+    docstring for caveats).
 
-    Future Phase 1-completion work will swap this for a real Polygon fetch.
-    Until then strategies receive gamma walls as pre-merged columns on
-    ``exec_df_1H`` (see ``apex.data.dealer_levels.ingest_flux_points``).
+    Returns an empty-shape chain (no contracts) on errors so callers
+    degrade gracefully to NaN dealer levels rather than crashing.
     """
-    raise NotImplementedError(
-        "options_gex._fetch_chain is a stub. Monkeypatch in tests or pre-cache."
-    )
+    from apex.data.polygon_options import build_chain_for_date
+    from apex.data.polygon_client import fetch_daily
+    from apex.config import CACHE_DIR
+
+    if isinstance(as_of, str):
+        as_of_str = as_of
+    else:
+        as_of_str = pd.Timestamp(as_of).strftime("%Y-%m-%d")
+
+    # Resolve spot from cached daily bars (most recent close on/before as_of).
+    try:
+        _, daily_df, _ = fetch_daily(symbol)
+    except Exception:
+        return {}
+    if daily_df is None or daily_df.empty:
+        return {}
+
+    daily_df = daily_df.copy()
+    daily_df["datetime"] = pd.to_datetime(daily_df["datetime"])
+    target_date = pd.Timestamp(as_of_str).normalize()
+    matching = daily_df[daily_df["datetime"].dt.normalize() == target_date]
+    if matching.empty:
+        matching = daily_df[daily_df["datetime"].dt.normalize() < target_date]
+    if matching.empty:
+        return {}
+    spot = float(matching.iloc[-1]["close"])
+
+    chain_dir = Path(CACHE_DIR) / "options_chain"
+    return build_chain_for_date(symbol, as_of_str, spot, chain_dir)
 
 
 def _aggregate_gex(chain: dict, spot: float) -> dict:

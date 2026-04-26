@@ -35,12 +35,37 @@ class EnsembleCombiner:
             'portfolio_position': Series (combined position over time),
             'trades': list[dict] (rebalance events),
           }
+
+        Note: strategies named "cross_asset_vol_overlay" are treated specially:
+        their compute_position_size output is a per-bar SIZE MULTIPLIER applied
+        to the combined portfolio position, NOT summed as a directional signal.
         """
         per_strategy_signals: Dict[str, pd.DataFrame] = {}
         per_strategy_positions: Dict[str, pd.Series] = {}
         per_strategy_returns: Dict[str, pd.Series] = {}
 
+        # Determine length n for the overlay multiplier (default 1.0)
+        exec_df = data.get("exec_df_1H", pd.DataFrame())
+        n_bars = len(exec_df)
+        overlay_mult = pd.Series([1.0] * n_bars)
+
+        # Track overlay names so they are NOT summed into the directional
+        # combined position and NOT included in the risk-parity weighting.
+        overlay_names: List[str] = []
+
+        non_overlay_strategies = []
         for s in self.strategies:
+            if s.name == "cross_asset_vol_overlay":
+                sig = s.compute_signals(data)
+                overlay_mult = s.compute_position_size(data, sig)
+                # Track overlay's signals/positions for transparency
+                per_strategy_signals[s.name] = sig
+                per_strategy_positions[s.name] = overlay_mult
+                overlay_names.append(s.name)
+            else:
+                non_overlay_strategies.append(s)
+
+        for s in non_overlay_strategies:
             sig = s.compute_signals(data)
             pos = s.compute_position_size(data, sig)
             per_strategy_signals[s.name] = sig
@@ -72,12 +97,19 @@ class EnsembleCombiner:
             current_regime = "UNKNOWN"
         weights = apply_regime_tilts(weights, current_regime)
 
-        # Combine per-strategy positions
+        # Combine per-strategy positions (exclude overlay strategies — they
+        # contribute as a final-stage size multiplier, not a directional bet).
         n = len(next(iter(per_strategy_positions.values())))
         combined = pd.Series([0.0] * n)
         for name, pos in per_strategy_positions.items():
+            if name in overlay_names:
+                continue
             w = weights.get(name, 0.0)
             combined = combined + w * pos.values
+
+        # Apply overlay multiplier (per-bar size scaler) to combined position
+        if len(overlay_mult) == n:
+            combined = combined * overlay_mult.values
 
         # Generate "trade" events whenever combined position shifts > threshold
         trades = []

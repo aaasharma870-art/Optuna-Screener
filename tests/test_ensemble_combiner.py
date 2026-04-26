@@ -94,3 +94,51 @@ def test_combiner_zeroes_weights_in_r4():
     result = combiner.run(data)
     # Final positions should be zero in R4
     assert (result["portfolio_position"].abs() < 1e-9).all()
+
+
+class _FakeOverlay:
+    """Fake overlay strategy that returns a per-bar size multiplier."""
+
+    def __init__(self, name="cross_asset_vol_overlay", mult_value=0.5):
+        self.name = name
+        self.data_requirements = []
+        self._mult_value = mult_value
+
+    def compute_signals(self, data):
+        n = len(data["exec_df_1H"])
+        return pd.DataFrame({
+            "entry_long":  pd.Series([False] * n),
+            "entry_short": pd.Series([False] * n),
+            "exit_long":   pd.Series([False] * n),
+            "exit_short":  pd.Series([False] * n),
+        })
+
+    def compute_position_size(self, data, signals):
+        n = len(data["exec_df_1H"])
+        return pd.Series([self._mult_value] * n)
+
+    def get_tunable_params(self):
+        return {}
+
+
+def test_overlay_strategy_scales_combined_position():
+    """When the overlay returns 0.5, the final combined position must be HALF
+    what it would be without the overlay (other weights/positions unchanged)."""
+    from apex.ensemble.combiner import EnsembleCombiner
+    n = 100
+    sig = pd.Series([True if i % 5 == 0 else False for i in range(n)])
+
+    # Baseline: just the directional strategy
+    base_strats = [_FakeStrategy("vrp_gex_fade", sig, 0.6)]
+    base = EnsembleCombiner(base_strats).run(_make_data(n))
+
+    # With overlay returning 0.5 multiplier
+    overlay_strats = [_FakeStrategy("vrp_gex_fade", sig, 0.6),
+                      _FakeOverlay(mult_value=0.5)]
+    overlaid = EnsembleCombiner(overlay_strats).run(_make_data(n))
+
+    # Final positions should be exactly HALF the baseline at every bar
+    base_pos = base["portfolio_position"].values
+    overlay_pos = overlaid["portfolio_position"].values
+    assert len(base_pos) == len(overlay_pos) == n
+    np.testing.assert_allclose(overlay_pos, base_pos * 0.5, rtol=1e-9, atol=1e-12)

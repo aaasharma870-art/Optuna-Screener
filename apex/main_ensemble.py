@@ -708,8 +708,8 @@ def run_ensemble_pipeline(data_dict: Dict[str, Dict[str, Any]],
     ref_close = primary_data["exec_df_1H"]["close"]
     ref_dt = primary_data["exec_df_1H"]["datetime"]
 
-    # ---- Layer B: portfolio CPCV ----
-    log("=== ENSEMBLE: Layer B (portfolio CPCV) ===")
+    # ---- Layer B (TUNE window): portfolio CPCV ----
+    log("=== ENSEMBLE: Layer B (TUNE window CPCV) ===")
     layer_b: Dict[str, Any] = {}
     try:
         layer_b = run_layer_b_validation(combiner_result, ref_close, cfg)
@@ -724,9 +724,75 @@ def run_ensemble_pipeline(data_dict: Dict[str, Dict[str, Any]],
     median_b = layer_b.get("sharpe_median", 0.0)
     iqr_b = layer_b.get("sharpe_iqr", (0.0, 0.0))
     pct_b = layer_b.get("sharpe_pct_positive", 0.0)
-    log(f"  Layer B: median Sharpe={median_b:.2f} "
+    log(f"  Layer B (tune):    median Sharpe={median_b:.2f} "
         f"IQR=[{iqr_b[0]:.2f},{iqr_b[1]:.2f}] +%={pct_b*100:.0f} "
         f"-> {layer_b.get('layer_b_status','?')}")
+
+    # ---- Layer B (HOLDOUT window): TRUE OOS portfolio CPCV ----
+    log("=== ENSEMBLE: Layer B (HOLDOUT window CPCV) "
+        "-- TRUE OOS, never seen by tuner ===")
+    layer_b_holdout: Dict[str, Any] = {}
+    holdout_combiner_result: Dict[str, Any] = {}
+    holdout_ref_close: Optional[pd.Series] = None
+    holdout_ref_dt: Optional[pd.Series] = None
+    holdout_data_per_symbol: Dict[str, Dict[str, Any]] = {}
+    primary_holdout_df = data_dict.get(primary, {}).get("exec_df_holdout")
+    if primary_holdout_df is None or len(primary_holdout_df) < 100:
+        log(f"  Holdout window too short for {primary} "
+            f"(need >=100 bars, got {0 if primary_holdout_df is None else len(primary_holdout_df)}) "
+            f"-- skipping Layer B holdout", "WARN")
+        layer_b_holdout = {"error": "holdout too short", "skipped": True}
+    else:
+        # Build holdout-shaped data dict for the combiner
+        for sym, sd in data_dict.items():
+            hdf = sd.get("exec_df_holdout")
+            if hdf is None or len(hdf) <= 100:
+                continue
+            n_h = len(hdf)
+            holdout_data_per_symbol[sym] = {
+                "exec_df_1H": hdf,
+                "regime_state": sd.get(
+                    "regime_state_holdout",
+                    pd.Series(["UNKNOWN"] * n_h),
+                ),
+                "symbol": sym,
+            }
+        # Run the combiner on the holdout window of the primary symbol
+        if primary not in holdout_data_per_symbol:
+            log(f"  Primary {primary} dropped from holdout map (too short) "
+                f"-- skipping Layer B holdout", "WARN")
+            layer_b_holdout = {"error": "primary holdout missing", "skipped": True}
+        else:
+            try:
+                holdout_combiner_result = combiner.run(
+                    holdout_data_per_symbol[primary]
+                )
+                holdout_ref_close = holdout_data_per_symbol[primary]["exec_df_1H"]["close"]
+                holdout_ref_dt = holdout_data_per_symbol[primary]["exec_df_1H"]["datetime"]
+                layer_b_holdout = run_layer_b_validation(
+                    holdout_combiner_result, holdout_ref_close, cfg,
+                )
+            except Exception as e:
+                log(f"  Layer B (holdout) failed: {e}", "ERROR")
+                traceback.print_exc()
+                layer_b_holdout = {"error": str(e)}
+    layer_b_holdout_serial = _serialize_layer_b(layer_b_holdout)
+    (run_output / "ensemble_layer_b_holdout_results.json").write_text(
+        json.dumps(layer_b_holdout_serial, indent=2)
+    )
+    median_b_h = layer_b_holdout.get("sharpe_median", 0.0) or 0.0
+    iqr_b_h = layer_b_holdout.get("sharpe_iqr", (0.0, 0.0)) or (0.0, 0.0)
+    pct_b_h = layer_b_holdout.get("sharpe_pct_positive", 0.0) or 0.0
+    if layer_b_holdout.get("skipped"):
+        log("  Layer B (holdout): SKIPPED (insufficient holdout data)")
+        sharpe_decay = float("nan")
+    else:
+        log(f"  Layer B (holdout): median Sharpe={median_b_h:.2f} "
+            f"IQR=[{iqr_b_h[0]:.2f},{iqr_b_h[1]:.2f}] +%={pct_b_h*100:.0f} "
+            f"-> {layer_b_holdout.get('layer_b_status','?')}")
+        sharpe_decay = float(median_b_h) - float(median_b)
+        log(f"  Holdout vs Tune Sharpe gap: {sharpe_decay:+.2f} "
+            f"({'decay' if sharpe_decay < 0 else 'lift'})")
 
     # ---- Layer C: walk-forward weights ----
     log("=== ENSEMBLE: Layer C (walk-forward weights) ===")
@@ -756,6 +822,95 @@ def run_ensemble_pipeline(data_dict: Dict[str, Dict[str, Any]],
     else:
         log(f"  Layer C error: {layer_c.get('error','?')}")
 
+    # ---- PnL stats (TUNE + HOLDOUT) ----
+    from apex.ensemble.pnl import compute_pnl_stats
+
+    pnl_periods_per_year = 252 * 7  # ~7 RTH bars/day at 1H
+
+    def _pnl_table(label: str,
+                   ref_close_local: pd.Series,
+                   per_strategy_pos: Dict[str, pd.Series],
+                   portfolio_pos: pd.Series) -> Dict[str, Dict[str, Any]]:
+        """Compute and pretty-print PnL per strategy + ensemble."""
+        out: Dict[str, Dict[str, Any]] = {}
+        log(f"=== ENSEMBLE: PnL ({label}) ===")
+        log(f"  {'Strategy':30s} {'Trades':>7s} {'WinRate%':>9s} "
+            f"{'TotalRet%':>10s} {'MaxDD%':>9s} {'Sharpe':>8s} {'Calmar':>8s}")
+        for name, pos in per_strategy_pos.items():
+            if name == "cross_asset_vol_overlay":
+                continue
+            stats = compute_pnl_stats(
+                pd.Series(pos), pd.Series(ref_close_local),
+                periods_per_year=pnl_periods_per_year,
+            )
+            out[name] = stats
+            if "error" in stats:
+                log(f"  {name:30s}  (error: {stats['error']})")
+                continue
+            log(f"  {name:30s} {stats['n_trades']:>7d} "
+                f"{stats['win_rate_pct']:>9.1f} "
+                f"{stats['total_return_pct']:>+10.2f} "
+                f"{stats['max_dd_pct']:>+9.2f} "
+                f"{stats['sharpe_annualized']:>8.2f} "
+                f"{stats['calmar']:>8.2f}")
+        port_stats = compute_pnl_stats(
+            pd.Series(portfolio_pos), pd.Series(ref_close_local),
+            periods_per_year=pnl_periods_per_year,
+        )
+        out["__portfolio__"] = port_stats
+        if "error" not in port_stats:
+            log(f"  {'PORTFOLIO (combined)':30s} {port_stats['n_trades']:>7d} "
+                f"{port_stats['win_rate_pct']:>9.1f} "
+                f"{port_stats['total_return_pct']:>+10.2f} "
+                f"{port_stats['max_dd_pct']:>+9.2f} "
+                f"{port_stats['sharpe_annualized']:>8.2f} "
+                f"{port_stats['calmar']:>8.2f}")
+        return out
+
+    pnl_tune = _pnl_table(
+        "TUNE window",
+        ref_close,
+        combiner_result.get("per_strategy_positions", {}),
+        combiner_result.get("portfolio_position", pd.Series(dtype=float)),
+    )
+
+    if holdout_combiner_result and holdout_ref_close is not None:
+        pnl_holdout = _pnl_table(
+            "HOLDOUT window -- TRUE OOS",
+            holdout_ref_close,
+            holdout_combiner_result.get("per_strategy_positions", {}),
+            holdout_combiner_result.get(
+                "portfolio_position", pd.Series(dtype=float)
+            ),
+        )
+        # Decay diagnostic
+        port_t = pnl_tune.get("__portfolio__", {}) or {}
+        port_h = pnl_holdout.get("__portfolio__", {}) or {}
+        if "error" not in port_t and "error" not in port_h:
+            sharpe_drop = float(port_h.get("sharpe_annualized", 0.0)) - \
+                          float(port_t.get("sharpe_annualized", 0.0))
+            return_drop = float(port_h.get("total_return_pct", 0.0)) - \
+                          float(port_t.get("total_return_pct", 0.0))
+            log(f"  Holdout-vs-Tune decay: Sharpe {sharpe_drop:+.2f}, "
+                f"Return {return_drop:+.2f}%")
+    else:
+        pnl_holdout = {}
+        log("=== ENSEMBLE: PnL (HOLDOUT) skipped (no holdout combiner result) ===")
+
+    # Persist PnL data (full equity curves included)
+    try:
+        pnl_payload = {
+            "tune": {k: _serialize_layer_b(v) for k, v in pnl_tune.items()},
+            "holdout": {k: _serialize_layer_b(v) for k, v in pnl_holdout.items()},
+            "tune_split_index": len(ref_close) if ref_close is not None else 0,
+        }
+        (run_output / "ensemble_pnl.json").write_text(
+            json.dumps(pnl_payload, indent=2)
+        )
+        log(f"  PnL JSON: {run_output / 'ensemble_pnl.json'}")
+    except Exception as e:
+        log(f"  Could not write PnL JSON: {e}", "WARN")
+
     # ---- Headline summary ----
     log("=== ENSEMBLE SUMMARY ===")
     log("Per-strategy weights + Layer A status:")
@@ -770,8 +925,11 @@ def run_ensemble_pipeline(data_dict: Dict[str, Dict[str, Any]],
         w = weights.get(s.name, 0.0)
         st = layer_a_by_strat.get(s.name, "N/A")
         log(f"  {s.name:30s} w={w:.3f}  Layer A: {st}")
-    log(f"Layer B median Sharpe = {median_b:.2f}, IQR = "
+    log(f"Layer B (tune)    median Sharpe = {median_b:.2f}, IQR = "
         f"[{iqr_b[0]:.2f}, {iqr_b[1]:.2f}], +%folds = {pct_b*100:.0f}")
+    if not layer_b_holdout.get("skipped") and "error" not in layer_b_holdout:
+        log(f"Layer B (holdout) median Sharpe = {median_b_h:.2f}, IQR = "
+            f"[{iqr_b_h[0]:.2f}, {iqr_b_h[1]:.2f}], +%folds = {pct_b_h*100:.0f}")
     if "uplift" in layer_c:
         log(f"Layer C dynamic={layer_c['dynamic_sharpe']:.2f} "
             f"static={layer_c['static_sharpe']:.2f} "
@@ -786,6 +944,7 @@ def run_ensemble_pipeline(data_dict: Dict[str, Dict[str, Any]],
         "layer_a_rows": layer_a_rows,
         "layer_a_by_strategy": layer_a_by_strat,
         "layer_b": layer_b_serial,
+        "layer_b_holdout": layer_b_holdout_serial,
         "layer_c": _serialize_layer_b(layer_c),
         "combiner_trades": combiner_result.get("trades", []),
         "current_regime": combiner_result.get("current_regime", "UNKNOWN"),
@@ -795,6 +954,8 @@ def run_ensemble_pipeline(data_dict: Dict[str, Dict[str, Any]],
         "per_strategy_positions": {
             n: list(p) for n, p in combiner_result.get("per_strategy_positions", {}).items()
         },
+        "pnl_tune": {k: _serialize_layer_b(v) for k, v in pnl_tune.items()},
+        "pnl_holdout": {k: _serialize_layer_b(v) for k, v in pnl_holdout.items()},
         "run_info": run_info,
     }
 

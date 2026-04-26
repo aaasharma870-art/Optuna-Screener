@@ -1,5 +1,6 @@
 """Backtest engine: indicator signals, regime, entry scoring, bar-by-bar simulation."""
 
+import logging
 import math
 
 import numpy as np
@@ -14,13 +15,35 @@ from apex.engine.fees import borrow_fee_from_bars, lookup_borrow_rate
 from apex.engine.stops import compute_dynamic_stop
 from apex.indicators.fvg import detect_fvgs
 
+_logger = logging.getLogger(__name__)
+
 
 def compute_indicator_signals(df, architecture, params):
     """
     Compute all indicators specified in *architecture['indicators']* and
-    return a dict of per-bar signal Series.
+    return a complete ``signals_data`` dict ready to feed into
+    :func:`run_backtest`.
 
-    Each signal is an integer Series: +1 = bullish, -1 = bearish, 0 = neutral.
+    Returned shape::
+
+        {
+            "signals": {<name>: pd.Series of -1/0/+1},
+            "regime":  pd.Series of "R1".."R4",
+            "score":   pd.Series of int composite score,
+            "atr":     pd.Series of ATR,
+            "extras":  {<name>: pd.Series}  # only populated for VRP mode
+        }
+
+    Backward-compatibility note: legacy callers that did
+    ``signals = compute_indicator_signals(...)`` and then accessed indicator
+    series via ``signals["RSI"]`` should now read ``signals_data["signals"]["RSI"]``.
+    The bundled ``full_backtest`` is updated accordingly.
+
+    For ``architecture["regime_model"] == "vrp"`` the function additionally
+    pre-computes the per-bar context required by
+    :func:`determine_entry_direction` (VPIN, VWCLV, VWAP bands, deviation
+    zones, breakout reversal triggers, sweep proxies, and aligned
+    VIX/VRP_pct series) and stores them under ``signals_data["extras"]``.
     """
     active = architecture.get("indicators", [])
     close = df["close"]
@@ -149,8 +172,129 @@ def compute_indicator_signals(df, architecture, params):
         sig[(sig == 0) & (ema_f < ema_s)] = -1
         signals["EMA_Cross"] = sig
 
-    signals["_atr"] = atr
-    return signals
+    # ----- Regime + composite score -----
+    regime_model = architecture.get("regime_model", "ema")
+    regime = compute_regime(df, None, regime_model, params)
+    score = compute_entry_score(signals, regime, architecture, params)
+
+    # ----- Extras (VRP mode only) -----
+    extras = _compute_vrp_extras(df, atr, architecture) if regime_model == "vrp" else {}
+
+    signals_data = {
+        "signals": signals,
+        "regime": regime,
+        "score": score,
+        "atr": atr,
+        "extras": extras,
+    }
+    return signals_data
+
+
+def _compute_vrp_extras(df, atr, architecture):
+    """Pre-compute the per-bar context required by :func:`determine_entry_direction`.
+
+    Returns a dict of pd.Series / np.ndarray columns keyed by the names that
+    ``determine_entry_direction`` reads from ``signals_data['extras']``.
+
+    The function never raises -- if upstream regime data (vix/vxv/vrp_pct) or
+    a timestamp column is missing, it falls back to NaN/empty series and
+    logs a warning. With NaN VRP inputs the regime classifier emits R4
+    everywhere, which yields zero trades.
+    """
+    extras = {}
+
+    # Need a copy that carries an "atr" column so VWAP-bands can reuse it
+    # without recomputing.
+    df_local = df.copy()
+    df_local["atr"] = atr
+
+    # ----- VWAP bands + deviation zone -----
+    have_timestamp = "timestamp" in df_local.columns or "datetime" in df_local.columns
+    vwap_df = None
+    if have_timestamp:
+        ts_col = "timestamp" if "timestamp" in df_local.columns else "datetime"
+        try:
+            from apex.indicators.vwap_bands import compute_vwap_bands, compute_deviation_zone
+            vwap_df = compute_vwap_bands(df_local, timestamp_col=ts_col)
+            dev_df = compute_deviation_zone(vwap_df)
+            extras["vwap_lower"] = vwap_df["vwap_2s_lower"]
+            extras["vwap_upper"] = vwap_df["vwap_2s_upper"]
+            extras["vwap_slope"] = vwap_df["vwap_slope"]
+            extras["vwap_slope_atr"] = vwap_df["vwap_slope_atr"]
+            extras["in_deviation_zone_long"] = dev_df["in_deviation_zone_long"]
+            extras["in_deviation_zone_short"] = dev_df["in_deviation_zone_short"]
+            extras["in_pullback_zone"] = dev_df["in_pullback_zone"]
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.warning("VRP extras: VWAP-bands computation failed: %s", exc)
+            vwap_df = None
+    else:
+        _logger.warning(
+            "VRP extras: df has no timestamp/datetime column -- skipping VWAP bands."
+        )
+
+    # ----- VPIN -----
+    if "volume" in df_local.columns:
+        try:
+            from apex.indicators.vpin import compute_vpin
+            vpin_df = compute_vpin(df_local)
+            # determine_entry_direction reads `vpin` as a 0..1 ratio. The
+            # vpin column from compute_vpin is already in that range.
+            extras["vpin"] = vpin_df["vpin"]
+            extras["vpin_pct"] = vpin_df["vpin_pct"]
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.warning("VRP extras: VPIN computation failed: %s", exc)
+    else:
+        _logger.warning("VRP extras: df has no volume column -- skipping VPIN.")
+
+    # ----- VWCLV -----
+    try:
+        from apex.indicators.vwclv import compute_vwclv
+        vwclv_df = compute_vwclv(df_local)
+        extras["cum_vwclv"] = vwclv_df["cum_vwclv"]
+    except Exception as exc:  # pragma: no cover - defensive
+        _logger.warning("VRP extras: VWCLV computation failed: %s", exc)
+
+    # ----- Setup detectors (need vwap to be present) -----
+    if vwap_df is not None:
+        try:
+            from apex.engine.setups import detect_breakout_reversal, detect_sweep_proxy
+            br_df = detect_breakout_reversal(vwap_df, atr)
+            extras["breakout_reversal_long"] = br_df["breakout_reversal_long"]
+            extras["breakout_reversal_short"] = br_df["breakout_reversal_short"]
+
+            fvgs = detect_fvgs(vwap_df)
+            sw_df = detect_sweep_proxy(vwap_df, fvgs, atr)
+            extras["sweep_proxy_long"] = sw_df["sweep_proxy_long"]
+            extras["sweep_proxy_short"] = sw_df["sweep_proxy_short"]
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.warning("VRP extras: setup detectors failed: %s", exc)
+    else:
+        # Provide all-False series so callers can index without KeyError.
+        false_series = pd.Series(False, index=df.index)
+        extras.setdefault("breakout_reversal_long", false_series)
+        extras.setdefault("breakout_reversal_short", false_series)
+        extras.setdefault("sweep_proxy_long", false_series)
+        extras.setdefault("sweep_proxy_short", false_series)
+        extras.setdefault("in_deviation_zone_long", false_series)
+        extras.setdefault("in_deviation_zone_short", false_series)
+        extras.setdefault("in_pullback_zone", false_series)
+
+    # ----- Aligned regime inputs -----
+    nan_series = pd.Series(np.nan, index=df.index)
+    extras["vix"] = df["vix"] if "vix" in df.columns else nan_series
+    extras["vrp_pct"] = df["vrp_pct"] if "vrp_pct" in df.columns else nan_series
+
+    # ----- Close passthrough (determine_entry_direction reads close at bar i) -----
+    extras["close"] = df["close"]
+
+    # ----- RSI2 (short-period RSI used by R1/R2 fade logic) -----
+    try:
+        rsi2 = compute_rsi(df["close"], period=2)
+        extras["rsi2"] = rsi2
+    except Exception as exc:  # pragma: no cover - defensive
+        _logger.warning("VRP extras: RSI2 computation failed: %s", exc)
+
+    return extras
 
 
 def compute_regime(df, daily_df, regime_model, params):
@@ -209,8 +353,21 @@ def compute_regime(df, daily_df, regime_model, params):
 
     elif regime_model == "vrp":
         from apex.regime.vrp_regime import compute_vrp_regime
-        # df must already have vix, vxv, vrp_pct columns (merged upstream)
-        regime = compute_vrp_regime(df, df["vix"], df["vxv"], df["vrp_pct"])
+        # df should have vix, vxv, vrp_pct columns (merged upstream from
+        # daily VIX/VXV + realized-vol fetch). When any of these is missing
+        # we fall back to all-NaN inputs, which compute_vrp_regime maps to
+        # R4 (no trade) -- the backtest then produces zero trades.
+        nan_series = pd.Series(np.nan, index=df.index)
+        if "vix" not in df.columns or "vxv" not in df.columns or "vrp_pct" not in df.columns:
+            missing = [c for c in ("vix", "vxv", "vrp_pct") if c not in df.columns]
+            _logger.warning(
+                "compute_regime(vrp): missing columns %s -- treating all bars as R4.",
+                missing,
+            )
+        vix_s = df["vix"] if "vix" in df.columns else nan_series
+        vxv_s = df["vxv"] if "vxv" in df.columns else nan_series
+        vrp_s = df["vrp_pct"] if "vrp_pct" in df.columns else nan_series
+        regime = compute_vrp_regime(df, vix_s, vxv_s, vrp_s)
 
     else:
         # Default simple "ema" regime: EMA20 vs EMA50 on the execution timeframe
@@ -862,28 +1019,16 @@ def full_backtest(df, daily_df, architecture, params):
     """
     End-to-end single-pass backtest.
 
-    1. Compute indicator signals
-    2. Compute regime
-    3. Compute entry score
-    4. Run bar-by-bar backtest
+    1. Compute indicator signals (also computes regime, score, atr, extras)
+    2. Run bar-by-bar backtest
 
     Returns (trades, stats).
+
+    Note: ``daily_df`` is accepted for backward compatibility but the regime
+    computation embedded in :func:`compute_indicator_signals` does not use
+    it -- the legacy regime models operate on the execution-timeframe df.
     """
-    signals = compute_indicator_signals(df, architecture, params)
-    atr = signals.pop("_atr")
-
-    regime_model = architecture.get("regime_model", "ema")
-    regime = compute_regime(df, daily_df, regime_model, params)
-
-    score = compute_entry_score(signals, regime, architecture, params)
-
-    signals_data = {
-        "signals": signals,
-        "regime": regime,
-        "score": score,
-        "atr": atr,
-    }
-
+    signals_data = compute_indicator_signals(df, architecture, params)
     return run_backtest(df, signals_data, architecture, params)
 
 

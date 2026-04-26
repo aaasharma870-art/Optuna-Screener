@@ -1,0 +1,27 @@
+{
+  "symbol": "SPY",
+  "as_of": "2025-06-17",
+  "spot": 600.0,
+  "expiries": [
+    {
+      "expiry": "2025-07-18",
+      "dte": 31,
+      "contracts": [
+        {"type": "call", "strike": 580.0, "open_interest": 12000, "gamma": 0.012, "iv": 0.18, "delta": 0.78},
+        {"type": "call", "strike": 590.0, "open_interest": 18000, "gamma": 0.018, "iv": 0.16, "delta": 0.65},
+        {"type": "call", "strike": 600.0, "open_interest": 25000, "gamma": 0.022, "iv": 0.15, "delta": 0.50},
+        {"type": "call", "strike": 605.0, "open_interest": 30000, "gamma": 0.024, "iv": 0.15, "delta": 0.42},
+        {"type": "call", "strike": 610.0, "open_interest": 45000, "gamma": 0.020, "iv": 0.14, "delta": 0.32},
+        {"type": "call", "strike": 615.0, "open_interest": 22000, "gamma": 0.015, "iv": 0.14, "delta": 0.24},
+        {"type": "call", "strike": 620.0, "open_interest": 14000, "gamma": 0.011, "iv": 0.14, "delta": 0.18},
+        {"type": "put",  "strike": 580.0, "open_interest": 11000, "gamma": 0.011, "iv": 0.20, "delta": -0.20},
+        {"type": "put",  "strike": 585.0, "open_interest": 16000, "gamma": 0.014, "iv": 0.19, "delta": -0.25},
+        {"type": "put",  "strike": 590.0, "open_interest": 38000, "gamma": 0.020, "iv": 0.18, "delta": -0.32},
+        {"type": "put",  "strike": 595.0, "open_interest": 27000, "gamma": 0.022, "iv": 0.17, "delta": -0.40},
+        {"type": "put",  "strike": 600.0, "open_interest": 21000, "gamma": 0.022, "iv": 0.16, "delta": -0.50},
+        {"type": "put",  "strike": 610.0, "open_interest": 15000, "gamma": 0.018, "iv": 0.15, "delta": -0.68},
+        {"type": "put",  "strike": 620.0, "open_interest": 10000, "gamma": 0.011, "iv": 0.15, "delta": -0.82}
+      ]
+    }
+  ]
+}

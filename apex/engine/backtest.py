@@ -303,27 +303,66 @@ def _inject_exec_params(params, config=None):
     return merged
 
 
+def _vrp_size_mult(regime_val, vrp_pct_val, vix_val):
+    """Position-size multiplier per VRP regime + conviction inputs.
+
+    Sizing rules (from VRP doc):
+      R1 + (vrp_pct > 80 AND vix < 18) -> 1.0  (high-conviction fade)
+      R1 + (vrp_pct in [70, 80] OR vix in [18, 22]) -> 0.5  (marginal)
+      R2 -> 0.5  (half-size by definition)
+      R3 -> 1.0  (amplified trend, edge in R-multiple)
+      R4 -> 0.0
+    Missing vrp_pct / vix in R1 falls through to half-size (defensive).
+    """
+    if regime_val == "R4":
+        return 0.0
+    if regime_val == "R3":
+        return 1.0
+    if regime_val == "R2":
+        return 0.5
+    if regime_val == "R1":
+        # High-conviction window: VRP very rich AND VIX low
+        if (vrp_pct_val is not None and not math.isnan(vrp_pct_val)
+                and vix_val is not None and not math.isnan(vix_val)
+                and vrp_pct_val > 80 and vix_val < 18):
+            return 1.0
+        # Marginal window: VRP moderately rich OR VIX in transition band
+        if vrp_pct_val is not None and not math.isnan(vrp_pct_val):
+            if 70 <= vrp_pct_val <= 80:
+                return 0.5
+        if vix_val is not None and not math.isnan(vix_val):
+            if 18 <= vix_val <= 22:
+                return 0.5
+        # Default for R1 with missing/unclassified inputs: half size (defensive)
+        return 0.5
+    return 0.0
+
+
 def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
-    """Return 'long', 'short', or None based on VRP regime gating.
+    """Return (direction, size_mult) based on VRP regime gating.
+
+    direction is one of "long", "short", or None.
+    size_mult is a position-size multiplier in [0.0, 1.0].
+
+    Per VRP doc:
 
     R1 (Suppressed Fade):
       - long when RSI2 < oversold AND (VWCLV bullish divergence OR near VWAP-2sigma)
       - short when RSI2 > overbought AND (VWCLV bearish divergence OR near VWAP+2sigma)
-      - Full size
+      - size: 1.0 if (vrp_pct > 80 AND vix < 18), else 0.5
 
     R2 (Reduced Fade):
-      - Same logic as R1 but flagged as half-size
+      - Same logic as R1
+      - size: 0.5
 
     R3 (Amplified Trend):
       - long when cum_vwclv > threshold AND vwap slope positive AND VPIN confirms
       - short when cum_vwclv < -threshold AND vwap slope negative AND VPIN confirms
+      - size: 1.0
 
     R4 (No Trade):
-      - Always returns None
+      - direction = None, size_mult = 0.0
     """
-    if regime_val == "R4":
-        return None
-
     # Extract helper series / scalars from signals_data
     extras = signals_data.get("extras", {})
 
@@ -334,6 +373,8 @@ def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
     vwap_lower = extras.get("vwap_lower")
     vwap_upper = extras.get("vwap_upper")
     close_vals = extras.get("close")
+    vrp_pct_series = extras.get("vrp_pct")
+    vix_series = extras.get("vix")
 
     # Safe scalar extraction at bar i
     def _val(series, idx, default=float("nan")):
@@ -341,8 +382,15 @@ def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
             return default
         try:
             return float(series.iloc[idx])
-        except (IndexError, TypeError):
+        except (IndexError, TypeError, AttributeError):
             return default
+
+    vrp_pct_val = _val(vrp_pct_series, i)
+    vix_val = _val(vix_series, i)
+    size_mult = _vrp_size_mult(regime_val, vrp_pct_val, vix_val)
+
+    if regime_val == "R4":
+        return (None, 0.0)
 
     rsi2_val = _val(rsi2, i)
     cum_vwclv_val = _val(cum_vwclv, i)
@@ -357,8 +405,6 @@ def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
     cum_vwclv_threshold = params.get("vrp_cum_vwclv_threshold", 1.0)
     vpin_threshold = params.get("vrp_vpin_threshold", 0.4)
 
-    import math
-
     if regime_val in ("R1", "R2"):
         # Fade logic: counter-trend entry
         near_lower = (not math.isnan(close_val) and not math.isnan(vwap_lower_val)
@@ -369,14 +415,14 @@ def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
 
         if not math.isnan(rsi2_val) and rsi2_val < rsi_oversold:
             if bullish_div or near_lower:
-                return "long"
+                return ("long", size_mult)
 
         bearish_div = not math.isnan(cum_vwclv_val) and cum_vwclv_val < 0
         if not math.isnan(rsi2_val) and rsi2_val > rsi_overbought:
             if bearish_div or near_upper:
-                return "short"
+                return ("short", size_mult)
 
-        return None
+        return (None, size_mult)
 
     if regime_val == "R3":
         # Trend-following logic
@@ -385,16 +431,16 @@ def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
         if (not math.isnan(cum_vwclv_val) and cum_vwclv_val > cum_vwclv_threshold
                 and not math.isnan(vwap_slope_val) and vwap_slope_val > 0
                 and vpin_ok):
-            return "long"
+            return ("long", size_mult)
 
         if (not math.isnan(cum_vwclv_val) and cum_vwclv_val < -cum_vwclv_threshold
                 and not math.isnan(vwap_slope_val) and vwap_slope_val < 0
                 and vpin_ok):
-            return "short"
+            return ("short", size_mult)
 
-        return None
+        return (None, size_mult)
 
-    return None
+    return (None, 0.0)
 
 
 def run_backtest(df, signals_data, architecture, params):

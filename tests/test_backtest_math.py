@@ -11,7 +11,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from apex.engine.backtest import (
-    run_backtest, compute_stats, DEFAULT_ARCHITECTURE, DEFAULT_PARAMS,
+    run_backtest, compute_stats, determine_entry_direction,
+    DEFAULT_ARCHITECTURE, DEFAULT_PARAMS,
 )
 
 
@@ -159,3 +160,70 @@ class TestTradeRecordHasDirectionField:
         assert len(trades) >= 1
         assert "direction" in trades[0]
         assert trades[0]["direction"] in ("long", "short")
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 Gap 5: VRP-scaled position sizing
+# ---------------------------------------------------------------------------
+
+def _signals_data_with_extras(n, vrp_pct, vix, **series):
+    """Build a signals_data dict carrying scalar VRP/VIX inputs as Series."""
+    idx = pd.RangeIndex(n)
+    extras = {
+        "vrp_pct": pd.Series([vrp_pct] * n, index=idx),
+        "vix": pd.Series([vix] * n, index=idx),
+    }
+    for k, v in series.items():
+        extras[k] = pd.Series([v] * n, index=idx)
+    return {
+        "regime": pd.Series(["R1"] * n, index=idx),
+        "score": pd.Series([0] * n, index=idx),
+        "atr": pd.Series([1.0] * n, index=idx),
+        "extras": extras,
+    }
+
+
+class TestDetermineEntryDirectionReturnShape:
+    def test_determine_entry_direction_returns_tuple(self):
+        """determine_entry_direction must always return a 2-tuple."""
+        sd = _signals_data_with_extras(5, vrp_pct=85, vix=15)
+        result = determine_entry_direction("R1", 0, sd, 0, {})
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        direction, size_mult = result
+        assert direction in ("long", "short", None)
+        assert isinstance(size_mult, float)
+        assert 0.0 <= size_mult <= 1.0
+
+
+class TestVRPScaledSizing:
+    def test_size_mult_for_r1_high_conviction(self):
+        """R1 with VRP=85 (>80) AND VIX=15 (<18) -> full size 1.0."""
+        sd = _signals_data_with_extras(5, vrp_pct=85, vix=15)
+        _, size_mult = determine_entry_direction("R1", 0, sd, 0, {})
+        assert size_mult == 1.0
+
+    def test_size_mult_for_r1_marginal(self):
+        """R1 with VRP=75 ([70,80]) and VIX=20 ([18,22]) -> half size 0.5."""
+        sd = _signals_data_with_extras(5, vrp_pct=75, vix=20)
+        _, size_mult = determine_entry_direction("R1", 0, sd, 0, {})
+        assert size_mult == 0.5
+
+    def test_size_mult_for_r2(self):
+        """R2 always -> 0.5."""
+        sd = _signals_data_with_extras(5, vrp_pct=50, vix=25)
+        _, size_mult = determine_entry_direction("R2", 0, sd, 0, {})
+        assert size_mult == 0.5
+
+    def test_size_mult_for_r3(self):
+        """R3 always -> 1.0."""
+        sd = _signals_data_with_extras(5, vrp_pct=20, vix=30)
+        _, size_mult = determine_entry_direction("R3", 0, sd, 0, {})
+        assert size_mult == 1.0
+
+    def test_size_mult_for_r4(self):
+        """R4 -> direction None and size_mult 0.0."""
+        sd = _signals_data_with_extras(5, vrp_pct=10, vix=40)
+        direction, size_mult = determine_entry_direction("R4", 0, sd, 0, {})
+        assert direction is None
+        assert size_mult == 0.0

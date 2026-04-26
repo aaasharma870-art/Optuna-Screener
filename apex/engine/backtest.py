@@ -528,21 +528,41 @@ def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
     rsi2 = extras.get("rsi2")
     cum_vwclv = extras.get("cum_vwclv")
     vwap_slope = extras.get("vwap_slope")
+    vwap_slope_atr_series = extras.get("vwap_slope_atr")
     vpin = extras.get("vpin")
+    vpin_pct_series = extras.get("vpin_pct")
     vwap_lower = extras.get("vwap_lower")
     vwap_upper = extras.get("vwap_upper")
     close_vals = extras.get("close")
     vrp_pct_series = extras.get("vrp_pct")
     vix_series = extras.get("vix")
+    breakout_reversal_long = extras.get("breakout_reversal_long")
+    breakout_reversal_short = extras.get("breakout_reversal_short")
+    sweep_proxy_long = extras.get("sweep_proxy_long")
+    sweep_proxy_short = extras.get("sweep_proxy_short")
 
     # Safe scalar extraction at bar i
     def _val(series, idx, default=float("nan")):
         if series is None:
             return default
         try:
-            return float(series.iloc[idx])
-        except (IndexError, TypeError, AttributeError):
+            v = series.iloc[idx]
+            if pd.isna(v):
+                return default
+            return float(v)
+        except (IndexError, TypeError, AttributeError, ValueError):
             return default
+
+    def _bool_at(series, idx):
+        if series is None:
+            return False
+        try:
+            v = series.iloc[idx]
+            if pd.isna(v):
+                return False
+            return bool(v)
+        except (IndexError, TypeError, AttributeError, ValueError):
+            return False
 
     vrp_pct_val = _val(vrp_pct_series, i)
     vix_val = _val(vix_series, i)
@@ -553,48 +573,82 @@ def determine_entry_direction(regime_val, entry_score, signals_data, i, params):
 
     rsi2_val = _val(rsi2, i)
     cum_vwclv_val = _val(cum_vwclv, i)
-    vwap_slope_val = _val(vwap_slope, i)
+    vwap_slope_val = _val(vwap_slope, i)  # raw (kept for back-compat / debug)
+    vwap_slope_atr_val = _val(vwap_slope_atr_series, i)
     vpin_val = _val(vpin, i)
+    vpin_pct_val = _val(vpin_pct_series, i)
     close_val = _val(close_vals, i)
     vwap_lower_val = _val(vwap_lower, i)
     vwap_upper_val = _val(vwap_upper, i)
 
+    br_long = _bool_at(breakout_reversal_long, i)
+    br_short = _bool_at(breakout_reversal_short, i)
+    sw_long = _bool_at(sweep_proxy_long, i)
+    sw_short = _bool_at(sweep_proxy_short, i)
+
     rsi_oversold = params.get("vrp_rsi_oversold", 20)
     rsi_overbought = params.get("vrp_rsi_overbought", 80)
-    cum_vwclv_threshold = params.get("vrp_cum_vwclv_threshold", 1.0)
-    vpin_threshold = params.get("vrp_vpin_threshold", 0.4)
+    # Bug 7: doc says R3 needs cum 5-bar VWCLV > 1.3 (confirmation), not 1.0.
+    cum_vwclv_threshold = params.get("vrp_cum_vwclv_threshold", 1.3)
+    # New tunable thresholds (Optuna can sweep these later).
+    vpin_low_threshold = params.get("vrp_vpin_low_pct", 50)   # R1/R2 max VPIN pct
+    vpin_high_threshold = params.get("vrp_vpin_high_pct", 60)  # R3 min VPIN pct
+    vwap_slope_atr_thresh = params.get("vrp_vwap_slope_atr_thresh", 0.2)
 
     if regime_val in ("R1", "R2"):
-        # Fade logic: counter-trend entry
+        # Fade logic: counter-trend entry.
+        # Doc R1 chain (suppressed fade):
+        #   - RSI2 oversold/overbought
+        #   - VWCLV bullish/bearish divergence OR price near VWAP +/-2 sigma band
+        #   - VPIN < 50th pct (noise-driven, no informed flow) -- Bug 3
+        #   - Breakout-reversal pattern present                  -- Bug 5
         near_lower = (not math.isnan(close_val) and not math.isnan(vwap_lower_val)
                       and close_val <= vwap_lower_val)
         near_upper = (not math.isnan(close_val) and not math.isnan(vwap_upper_val)
                       and close_val >= vwap_upper_val)
         bullish_div = not math.isnan(cum_vwclv_val) and cum_vwclv_val > 0
-
-        if not math.isnan(rsi2_val) and rsi2_val < rsi_oversold:
-            if bullish_div or near_lower:
-                return ("long", size_mult)
-
         bearish_div = not math.isnan(cum_vwclv_val) and cum_vwclv_val < 0
-        if not math.isnan(rsi2_val) and rsi2_val > rsi_overbought:
-            if bearish_div or near_upper:
-                return ("short", size_mult)
+
+        # Bug 3: low-VPIN gate (suppressed regime needs noise-driven environment).
+        vpin_low_ok = (not math.isnan(vpin_pct_val)
+                       and vpin_pct_val < vpin_low_threshold)
+
+        if (not math.isnan(rsi2_val) and rsi2_val < rsi_oversold
+                and (bullish_div or near_lower)
+                and vpin_low_ok
+                and br_long):
+            return ("long", size_mult)
+
+        if (not math.isnan(rsi2_val) and rsi2_val > rsi_overbought
+                and (bearish_div or near_upper)
+                and vpin_low_ok
+                and br_short):
+            return ("short", size_mult)
 
         return (None, size_mult)
 
     if regime_val == "R3":
-        # Trend-following logic
-        vpin_ok = not math.isnan(vpin_val) and vpin_val < vpin_threshold
+        # Trend-following logic.
+        # Doc R3 chain (amplified trend):
+        #   - VWAP slope > 0.2 ATR/bar in trend direction      -- Bug 4
+        #   - Cumulative 5-bar VWCLV > +threshold (long) / < -threshold (short)
+        #   - VPIN > 60th pct (informed flow active)            -- Bug 1, 2
+        #   - Sweep-proxy pattern present                       -- Bug 6
+        vpin_high_ok = (not math.isnan(vpin_pct_val)
+                        and vpin_pct_val > vpin_high_threshold)
 
         if (not math.isnan(cum_vwclv_val) and cum_vwclv_val > cum_vwclv_threshold
-                and not math.isnan(vwap_slope_val) and vwap_slope_val > 0
-                and vpin_ok):
+                and not math.isnan(vwap_slope_atr_val)
+                and vwap_slope_atr_val > vwap_slope_atr_thresh
+                and vpin_high_ok
+                and sw_long):
             return ("long", size_mult)
 
         if (not math.isnan(cum_vwclv_val) and cum_vwclv_val < -cum_vwclv_threshold
-                and not math.isnan(vwap_slope_val) and vwap_slope_val < 0
-                and vpin_ok):
+                and not math.isnan(vwap_slope_atr_val)
+                and vwap_slope_atr_val < -vwap_slope_atr_thresh
+                and vpin_high_ok
+                and sw_short):
             return ("short", size_mult)
 
         return (None, size_mult)

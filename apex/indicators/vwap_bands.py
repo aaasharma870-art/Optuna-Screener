@@ -3,12 +3,17 @@
 import numpy as np
 import pandas as pd
 
+from apex.indicators.basics import compute_atr
+
 
 def compute_vwap_bands(
-    df: pd.DataFrame, timestamp_col: str = "timestamp"
+    df: pd.DataFrame,
+    timestamp_col: str = "timestamp",
+    slope_window: int = 5,
 ) -> pd.DataFrame:
     """Return df with columns: vwap, vwap_1s_upper, vwap_1s_lower,
-    vwap_2s_upper, vwap_2s_lower, vwap_3s_upper, vwap_3s_lower.
+    vwap_2s_upper, vwap_2s_lower, vwap_3s_upper, vwap_3s_lower,
+    vwap_slope, vwap_slope_atr.
 
     Session reset: VWAP cumulative sums reset at each calendar-day boundary.
     typical_price = (high + low + close) / 3
@@ -16,6 +21,10 @@ def compute_vwap_bands(
     variance = cumsum(volume * (tp - vwap)^2) / cumsum(volume)
     sigma = sqrt(variance)
     bands = vwap +/- N*sigma for N in {1, 2, 3}
+
+    Slope columns:
+      vwap_slope = vwap.diff(slope_window)
+      vwap_slope_atr = vwap_slope / atr  (ATR computed inline if not present)
     """
     # Determine date boundaries
     ts = pd.to_datetime(df[timestamp_col])
@@ -58,5 +67,16 @@ def compute_vwap_bands(
     for n_sigma in (1, 2, 3):
         result[f"vwap_{n_sigma}s_upper"] = vwap + n_sigma * sigma
         result[f"vwap_{n_sigma}s_lower"] = vwap - n_sigma * sigma
+
+    # VWAP slope (absolute) and slope-to-ATR ratio (dimensionless)
+    vwap_series = pd.Series(vwap, index=df.index)
+    result["vwap_slope"] = vwap_series.diff(slope_window)
+
+    if "atr" in df.columns:
+        atr = df["atr"]
+    else:
+        atr = compute_atr(df, period=14)
+    atr_safe = atr.replace(0, np.nan)
+    result["vwap_slope_atr"] = result["vwap_slope"] / atr_safe
 
     return result

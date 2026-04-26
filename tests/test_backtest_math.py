@@ -227,3 +227,59 @@ class TestVRPScaledSizing:
         direction, size_mult = determine_entry_direction("R4", 0, sd, 0, {})
         assert direction is None
         assert size_mult == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 Gap 6: VWAP-anchored profit target
+# ---------------------------------------------------------------------------
+
+class TestVWAPTarget:
+    def test_default_target_type_preserves_legacy(self):
+        """Without target_type set, behavior matches the legacy fixed_target."""
+        prices = [100, 102, 104, 106, 108, 110]
+        df = _make_df(prices)
+        scores = [10, 0, 0, 0, 0, 0]
+        arch = {"direction": "long", "min_score": 5,
+                "exit_methods": ["fixed_target", "time_exit"]}
+        params = {"max_hold_bars": 4, "commission_pct": 0.0,
+                  "atr_stop_mult": 100, "atr_target_mult": 1.0}
+        sd = _make_signals_data(df, scores, atr_val=1.0)
+        trades, _ = run_backtest(df, sd, arch, params)
+        assert len(trades) >= 1
+        # entry at bar 1 open = 102, target = 102 + 1.0*ATR = 103
+        assert trades[0]["exit_reason"] == "fixed_target"
+
+    def test_vwap_target_requires_vwap_column(self):
+        """target_type='vwap' without df['vwap'] raises a clear error."""
+        prices = [100, 102, 104, 106]
+        df = _make_df(prices)
+        scores = [10, 0, 0, 0]
+        arch = {"direction": "long", "min_score": 5,
+                "exit_methods": ["fixed_target", "time_exit"]}
+        params = {"target_type": "vwap", "max_hold_bars": 3,
+                  "commission_pct": 0.0, "atr_stop_mult": 100,
+                  "atr_target_mult": 100}
+        sd = _make_signals_data(df, scores)
+        with pytest.raises(ValueError, match="vwap"):
+            run_backtest(df, sd, arch, params)
+
+    def test_vwap_target_exits_when_price_crosses_vwap(self):
+        """Long entered far below VWAP, then price rises through VWAP -> fixed_target hit."""
+        # Entry bar 1 open = 95, prices climb so that high crosses vwap.
+        prices = [95, 95, 96, 99, 101, 103]
+        df = _make_df(prices)
+        # Inject a constant VWAP at 100 so the target is unambiguous
+        df["vwap"] = 100.0
+        scores = [10, 0, 0, 0, 0, 0]
+        arch = {"direction": "long", "min_score": 5,
+                "exit_methods": ["fixed_target", "time_exit"]}
+        params = {"target_type": "vwap", "max_hold_bars": 5,
+                  "commission_pct": 0.0, "atr_stop_mult": 100,
+                  "atr_target_mult": 100}
+        sd = _make_signals_data(df, scores, atr_val=1.0)
+        trades, _ = run_backtest(df, sd, arch, params)
+        assert len(trades) >= 1
+        t = trades[0]
+        assert t["exit_reason"] == "fixed_target"
+        # Exit is clamped to bar range; price reaches 100 -> profitable long
+        assert t["pnl_pct"] > 0

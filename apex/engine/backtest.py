@@ -479,6 +479,16 @@ def run_backtest(df, signals_data, architecture, params):
     dyn_atr_fallback = params.get("dynamic_stop_atr_fallback", 2.0)
     dyn_fvg_buffer = params.get("dynamic_stop_fvg_buffer", 0.05)
 
+    # Phase 6 Gap 6: dynamic VWAP profit target (opt-in, default preserves legacy).
+    target_type = params.get("target_type", "fixed_pct")
+    use_vwap_target = (target_type == "vwap")
+    if use_vwap_target and "vwap" not in df.columns:
+        raise ValueError(
+            "params['target_type']='vwap' requires df['vwap'] column "
+            "(run compute_vwap_bands or compute_vwap upstream)."
+        )
+    vwap_vals = df["vwap"].values if use_vwap_target else None
+
     # Pre-compute FVGs once for the whole series (only when needed)
     fvgs = detect_fvgs(df) if use_dynamic_stop else []
 
@@ -616,6 +626,12 @@ def run_backtest(df, signals_data, architecture, params):
                         stop_price = new_dyn
 
             exit_reason = None
+
+            # Phase 6 Gap 6: recompute target each bar when using VWAP-anchored target
+            if use_vwap_target and use_fixed_target:
+                cur_vwap = vwap_vals[i]
+                if np.isfinite(cur_vwap):
+                    target_price = cur_vwap
 
             if trade_dir == "long":
                 # 1) Fixed stop — long: low breaches stop below

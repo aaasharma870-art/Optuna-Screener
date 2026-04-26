@@ -3,14 +3,19 @@
     "cache_dir": "apex_cache",
     "output_dir": "apex_results",
 
-    "target_symbols": [
-        "SPY", "QQQ",
-        "FIX", "ANAB", "ECO", "VRT", "AUGO", "FN", "VIST", "ARIS", "MOD", "AGX",
-        "PAHC", "KNSA", "ORLA", "WWD", "AGI", "CF", "FIVE", "TVTX", "LITE", "LQDA",
-        "BBIO", "MTSI", "SEI", "SII", "BAP", "UI", "VG", "MRVL", "MPWR", "AMD",
-        "NYT", "PWR", "FNV", "MRX", "CW", "GMED", "LB", "TSEM", "SNEX", "TARS",
-        "DGII", "RSI", "ARM", "ROST", "ADI", "LSCC", "VNOM", "CGAU", "MTZ"
-    ],
+    "strategy_mode": "vrp_regime",
+    "fred_api_key": "PASTE_YOUR_FRED_KEY_HERE",
+
+    "target_symbols": ["SPY", "QQQ", "GLD"],
+
+    "regime": {
+        "enabled": true,
+        "vix_ratio_contango_max": 0.95,
+        "vix_ratio_backwardation_min": 1.02,
+        "vrp_elevated_pct_low": 20,
+        "vrp_elevated_pct_high": 80,
+        "vrp_rolling_window": 252
+    },
 
     "universe": {
         "min_price": 15,
@@ -59,7 +64,7 @@
 
     "phase3_params": {
         "exec_timeframe": "1H",
-        "start_date": "2024-01-01",
+        "start_date": "2023-01-01",
         "end_date": "2025-12-31",
         "min_1h_bars": 200
     },

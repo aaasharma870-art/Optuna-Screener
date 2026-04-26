@@ -11,6 +11,57 @@
 
 ---
 
+## v3.0 — Institutional Multi-Strategy Ensemble
+
+In addition to single-strategy mode, the pipeline now ships a **6-strategy
+institutional ensemble** validated through three independent statistical
+layers. Run it with:
+
+```bash
+python apex.py --ensemble --budget light --no-amibroker
+```
+
+The ensemble combines structurally distinct edges via risk-parity weighting,
+applies a regime overlay (R1/R2/R3/R4 from the VRP regime classifier), and
+runs three layers of out-of-sample validation:
+
+- **Layer A** — per-strategy CPCV (28-fold OOS Sharpe distribution per symbol)
+- **Layer B** — portfolio-level CPCV on the combined NAV (PASS = median Sharpe > 0.8 AND > 65% folds positive)
+- **Layer C** — walk-forward dynamic-vs-static weight comparison (PASS = uplift >= 0.05 Sharpe)
+
+### The 6 Strategies
+
+| Strategy | Edge | Inputs |
+|---|---|---|
+| `vrp_gex_fade` | Fade price near gamma walls in suppressed-vol regimes | VRP percentile, gamma walls, RSI2, VPIN |
+| `opex_gravity` | Trade max-pain pinning during OPEX week | OPEX calendar, pin strikes |
+| `vix_term_structure` | Mean-revert extreme VIX/VIX3M curve dislocations | VIX, VXV |
+| `vol_skew_arb` | Mean-revert 25-delta put/call IV skew extremes | Options skew ratio |
+| `smc_structural` | Trade FVG + Order Block retests filtered by VIX < 25 + VPIN | Price structure, VIX |
+| `cross_asset_vol_overlay` | Scale total portfolio size by VIX/MOVE/OVX percentile regime | VIX/MOVE/OVX percentiles |
+
+The first five emit directional positions; the sixth is a per-bar size
+multiplier applied after risk-parity combination.
+
+### Realistic targets
+
+The institutional ensemble targets a **CPCV-validated Sharpe of 1.0–1.5**
+on real OOS data. Anything substantially higher than 2.0 on this codebase
+should be treated as a sign of curve-fit / data leak / look-ahead until
+forensically refuted — pre-cost backtests can produce eye-popping numbers
+that vanish under realistic transaction-cost and slippage assumptions.
+
+### Outputs
+
+Each `--ensemble` run writes to `apex_results/run_<timestamp>/`:
+
+- `strategy_layer_a_results.csv` — per (strategy, symbol) median Sharpe + IQR + status
+- `ensemble_layer_b_results.json` — full 28-fold OOS Sharpe distribution
+- `ensemble_layer_c_results.json` — dynamic vs static walk-forward Sharpe + uplift
+- `ensemble_report.html` — 7-tab Plotly-rendered HTML report (auto-opens in browser)
+
+---
+
 ## The Problem
 
 Anyone can write a trading strategy that looks profitable on historical data. The hard

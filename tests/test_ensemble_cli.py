@@ -20,14 +20,20 @@ def test_apex_config_has_ensemble_block():
     cfg = json.loads((REPO / "apex_config.json").read_text())
     ens = cfg.get("ensemble")
     assert ens is not None, "apex_config.json must define an 'ensemble' block"
-    # Default disabled
     assert ens.get("enabled") in (False, True)
     assert isinstance(ens.get("strategies"), list)
-    # All 6 strategies must be in the curated list
-    expected = {"vrp_gex_fade", "opex_gravity", "vix_term_structure",
-                "vol_skew_arb", "smc_structural", "cross_asset_vol_overlay"}
-    assert expected.issubset(set(ens["strategies"]))
-    assert ens.get("max_weight") == 0.30
+    # Default ensemble must match the production-validated preset.
+    # Untested strategies live in strategies/untested/ and must NOT be in
+    # the default list — gating them prevents the ~200hr options-chain
+    # ingest and re-introducing smc_structural which lost money OOS.
+    validated = {"vix_term_structure", "cross_asset_vol_overlay"}
+    untested = {"vrp_gex_fade", "opex_gravity", "vol_skew_arb",
+                "smc_structural", "ts_exhaustion_fade",
+                "vix_liquidity_reclaim", "institutional_arbitrage_engine_v2",
+                "advanced_compounder_v11"}
+    assert set(ens["strategies"]) == validated
+    assert untested.isdisjoint(set(ens["strategies"]))
+    assert ens.get("max_weight") == 1.00
     assert ens.get("vol_lookback_days") == 60
     assert ens.get("size_change_threshold") == 0.10
 

@@ -105,12 +105,12 @@
         "formulas_path": "C:\\Program Files\\AmiBroker\\Formulas\\Custom"
     },
 
+    "_ensemble_doc_": "Default ensemble matches the production-validated preset (configs/production/vix_term_v1_config.json). The 4 untested strategies (ts_exhaustion_fade, vix_liquidity_reclaim, institutional_arbitrage_engine_v2, advanced_compounder_v11) and the 4 failed/options-dependent strategies (smc_structural, vrp_gex_fade, opex_gravity, vol_skew_arb) are intentionally excluded — see strategies/tested/ and strategies/untested/. Add them back only after running a 75/25 holdout with real SPY/QQQ data and clearing Sharpe > 1 OOS.",
     "ensemble": {
         "enabled": true,
         "tune_strategies": true,
-        "strategies": ["vrp_gex_fade", "opex_gravity", "vix_term_structure",
-                       "vol_skew_arb", "smc_structural", "cross_asset_vol_overlay"],
-        "max_weight": 0.30,
+        "strategies": ["vix_term_structure", "cross_asset_vol_overlay"],
+        "max_weight": 1.00,
         "vol_lookback_days": 60,
         "size_change_threshold": 0.10
     },

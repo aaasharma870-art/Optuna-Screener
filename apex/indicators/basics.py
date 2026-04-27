@@ -24,6 +24,80 @@ def compute_atr(df, period=14):
     return tr.rolling(period).mean()
 
 
+def compute_supertrend(df, period=10, factor=3.0):
+    """TradingView-style Supertrend.
+
+    Returns (supertrend_line, direction), where direction matches Pine's
+    convention used by ta.supertrend: -1 is bullish/uptrend, +1 is bearish.
+    """
+    high = df["high"].astype(float).reset_index(drop=True)
+    low = df["low"].astype(float).reset_index(drop=True)
+    close = df["close"].astype(float).reset_index(drop=True)
+
+    atr = compute_atr(
+        pd.DataFrame({"high": high, "low": low, "close": close}),
+        period=period,
+    ).reset_index(drop=True)
+    hl2 = (high + low) / 2.0
+    upper_basic = hl2 + factor * atr
+    lower_basic = hl2 - factor * atr
+
+    n = len(close)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    st = np.full(n, np.nan)
+    direction = np.full(n, np.nan)
+
+    for i in range(n):
+        if pd.isna(atr.iloc[i]):
+            continue
+        if i == 0 or pd.isna(st[i - 1]):
+            upper[i] = upper_basic.iloc[i]
+            lower[i] = lower_basic.iloc[i]
+            if close.iloc[i] >= hl2.iloc[i]:
+                direction[i] = -1.0
+                st[i] = lower[i]
+            else:
+                direction[i] = 1.0
+                st[i] = upper[i]
+            continue
+
+        prev_upper = upper[i - 1]
+        prev_lower = lower[i - 1]
+        prev_close = close.iloc[i - 1]
+
+        upper[i] = (
+            upper_basic.iloc[i]
+            if upper_basic.iloc[i] < prev_upper or prev_close > prev_upper
+            else prev_upper
+        )
+        lower[i] = (
+            lower_basic.iloc[i]
+            if lower_basic.iloc[i] > prev_lower or prev_close < prev_lower
+            else prev_lower
+        )
+
+        if st[i - 1] == prev_upper:
+            if close.iloc[i] <= upper[i]:
+                st[i] = upper[i]
+                direction[i] = 1.0
+            else:
+                st[i] = lower[i]
+                direction[i] = -1.0
+        else:
+            if close.iloc[i] >= lower[i]:
+                st[i] = lower[i]
+                direction[i] = -1.0
+            else:
+                st[i] = upper[i]
+                direction[i] = 1.0
+
+    return (
+        pd.Series(st, index=df.index, name="supertrend"),
+        pd.Series(direction, index=df.index, name="supertrend_direction"),
+    )
+
+
 def compute_vwap(df):
     """Compute VWAP with intraday reset on each new calendar day."""
     dates = df["datetime"].dt.date

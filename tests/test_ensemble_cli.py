@@ -49,6 +49,14 @@ def test_main_argparse_accepts_ensemble_flag():
     assert "args.ensemble" in src
 
 
+def test_main_argparse_accepts_strategy_screener_flags():
+    """Quickly verify the strategy screener CLI is wired."""
+    src = (REPO / "apex" / "main.py").read_text()
+    assert "--screen-strategy" in src
+    assert "--screen-sp500" in src
+    assert "run_strategy_universe_screener" in src
+
+
 def test_legacy_path_still_intact():
     """The legacy DEFAULT_ARCHITECTURE / DEFAULT_PARAMS must NOT be touched."""
     from apex.engine.backtest import DEFAULT_ARCHITECTURE, DEFAULT_PARAMS

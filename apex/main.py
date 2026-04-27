@@ -345,6 +345,16 @@ def main():
                         help="Path to a user strategy .py file (uses exact entry/exit logic)")
     parser.add_argument("--ensemble", action="store_true",
                         help="Run multi-strategy ensemble pipeline (Phase 12 institutional ensemble)")
+    parser.add_argument("--screen-strategy", type=str, default="",
+                        help="Screen/tune one registered StrategyBase strategy across the universe")
+    parser.add_argument("--screen-sp500", action="store_true",
+                        help="Use current S&P 500 constituents for --screen-strategy")
+    parser.add_argument("--screen-trials", type=int, default=40,
+                        help="Optuna trials per symbol for --screen-strategy")
+    parser.add_argument("--screen-top-n", type=int, default=25,
+                        help="Rows to highlight in screener summary")
+    parser.add_argument("--screen-max-symbols", type=int, default=0,
+                        help="Optional cap for screener universe size")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -383,6 +393,18 @@ def main():
         cfg["optimization"] = opt
         target = cfg.get("target_symbols", list(SECTOR_MAP.keys())[:3])
         cfg["target_symbols"] = target[:3]
+
+    if args.screen_strategy and args.screen_sp500:
+        from apex.screener import limit_symbols, load_sp500_symbols
+        log("Loading current S&P 500 universe for strategy screener")
+        cfg["target_symbols"] = limit_symbols(
+            load_sp500_symbols(), args.screen_max_symbols or None,
+        )
+    elif args.screen_strategy and args.screen_max_symbols:
+        from apex.screener import limit_symbols
+        cfg["target_symbols"] = limit_symbols(
+            cfg.get("target_symbols", []), args.screen_max_symbols,
+        )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if args.output:
@@ -445,6 +467,41 @@ def main():
         from apex.main_ensemble import run_ensemble_pipeline
         return run_ensemble_pipeline(data_dict, cfg, run_info, run_output,
                                      no_amibroker=args.no_amibroker)
+
+    # ---- STRATEGY UNIVERSE SCREENER ----
+    if args.screen_strategy:
+        from apex.main_ensemble import prepare_ensemble_data, _resolve_strategy_classes
+        from apex.screener import run_strategy_universe_screener
+
+        cfg.setdefault("ensemble", {})
+        cfg["ensemble"]["strategies"] = [args.screen_strategy]
+        classes = _resolve_strategy_classes(cfg)
+        if not classes:
+            log(f"Unknown strategy for screener: {args.screen_strategy}", "ERROR")
+            sys.exit(1)
+
+        log(f"=== STRATEGY UNIVERSE SCREENER: {args.screen_strategy} ===")
+        log("Ranking uses tune-window score; holdout is diagnostic, not retuned.")
+        prepared = prepare_ensemble_data(data_dict, cfg)
+        result = run_strategy_universe_screener(
+            classes[0],
+            prepared,
+            cfg,
+            run_output,
+            n_trials=args.screen_trials,
+            top_n=args.screen_top_n,
+            seed=42,
+        )
+        log("=== SCREENER COMPLETE ===")
+        for row in result.get("top", [])[:args.screen_top_n]:
+            log(
+                f"  {row['symbol']}: rank={row['rank_score']:.2f} "
+                f"tune Sh={row['tune_sharpe']:.2f} "
+                f"holdout Sh={row['holdout_sharpe']:.2f} "
+                f"holdout Ret={row['holdout_return_pct']:.1f}% "
+                f"{'PASS' if row['holdout_pass'] else 'FAIL'}"
+            )
+        return result
 
     # ---- STRATEGY MODE ----
     if args.strategy:
